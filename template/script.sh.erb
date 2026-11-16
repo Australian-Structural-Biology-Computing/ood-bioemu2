@@ -244,7 +244,15 @@ apptainer exec --nv --cleanenv \
     --weights-precision "${WEIGHTS_PRECISION}" \
     "${ALLOW_DOWNLOAD[@]}"
 
-python3 "${OOD_SESSION_DIR}/build_report.py" "${OUT_DIR}"
+# Build the report inside the same pinned container: the host python3 may be
+# older than the 3.7 the report module requires (the compute nodes' default
+# python3 is 3.6, which rejects `from __future__ import annotations` -- found by
+# the first GPU smoke run), while the container carries the pinned 3.12.
+apptainer exec --cleanenv \
+  --bind "${OOD_SESSION_DIR}:${OOD_SESSION_DIR}:ro" \
+  --bind "${OUT_DIR}:${OUT_DIR}" \
+  "${BIOEMU2_IMAGE}" \
+  python "${OOD_SESSION_DIR}/build_report.py" "${OUT_DIR}"
 printf '%s\n' "${RUN_ID}" > "${OOD_SESSION_DIR}/run_dir.txt"
 ln -sfn "${OUT_DIR}" "${OOD_SESSION_DIR}/results"
 echo "BioEmu2 completed successfully: ${OUT_DIR}/report.html"

@@ -16,5 +16,9 @@ apptainer exec --nv --cleanenv \
   --protein ACDEFGHIKLMNPQRSTVWY --msa-mode single_sequence --seeds 1 \
   --num-recycles 1 --num-diffusion-samples 1 --mode structure --sampler edm \
   --physicality high_quality --weights-precision int8
-python3 "${ROOT}/template/build_report.py" "${OUT}/results"
+# Build the report inside the pinned container: the host python3 is 3.6 on
+# these nodes and cannot parse the report module.
+apptainer exec --cleanenv \
+  --bind "${ROOT}:${ROOT}:ro" --bind "${OUT}:${OUT}" \
+  "${IMAGE}" python "${ROOT}/template/build_report.py" "${OUT}/results"
 echo "GPU smoke test passed: ${OUT}/results/report.html"
