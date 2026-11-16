@@ -42,7 +42,9 @@ The form accepts:
 
 Identical protein sequences are represented as copies of one entity, matching the notebook.
 All input is parsed into an AlphaFold-3-dialect JSON file before inference. The application
-never executes input text.
+never executes input text. Molecular input fields are not cached by Open OnDemand. A selected
+FASTA file is copied into the run's private work directory, which is mounted into the
+container so the runner can read it.
 
 ## Output layout
 

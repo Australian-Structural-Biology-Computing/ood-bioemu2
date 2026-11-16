@@ -26,10 +26,6 @@ end
 %>
 form:
   - ood_user
-<% if scratch_quota_warning %>
-  - scratch_quota_warning
-<% end %>
-  - data_warning
   - run_name
   - protein_input
   - dna_input
@@ -49,6 +45,15 @@ form:
   - katana_citation
 
 cluster: "katana"
+form_header: |
+  Submit a protein sequence or FASTA file, or provide DNA, RNA, or ligand input below. You can combine molecule types in one request. Choose a task and sampling settings, then launch the GPU job.
+
+  Do not submit sensitive or highly sensitive data. Katana is not approved for those classifications.
+
+  When publishing results, cite BioEmu2 and ColabFold, and acknowledge the Structural Biology Facility and Katana. The relevant citations are listed in the app documentation.
+<% if scratch_quota_warning %>
+  WARNING: Scratch quota usage is above 80% (storage <%= scratch_quota_warning[:storage].round(1) %>%; files <%= scratch_quota_warning[:files].round(1) %>%). The job may fail if scratch space is exhausted.
+<% end %>
 
 attributes:
   ood_user:
@@ -56,25 +61,9 @@ attributes:
     cacheable: false
     value: "<%= ENV["USER"] %>"
 
-<% if scratch_quota_warning %>
-  scratch_quota_warning:
-    class: "d-none"
-    help: |
-      <div role="alert" style="padding:1rem;margin-bottom:1rem;background:#F8D7DA;border:3px solid #B00020;border-radius:.25rem;color:#721C24">
-        <b>&#9888; Your scratch quota usage is above 80%.</b>
-        Storage: <%= scratch_quota_warning[:storage].round(1) %>%; files: <%= scratch_quota_warning[:files].round(1) %>%. The run may fail if scratch space is exhausted.
-      </div>
-<% end %>
-
-  data_warning:
-    class: "d-none"
-    help: |
-      <div style="padding:.5rem .75rem;background:#E2BEBE;border:2px solid #761313;border-radius:.25rem;color:#761313">
-        <b>Warning:</b> Do not submit sensitive or highly sensitive data. Katana is not approved for those classifications.
-      </div>
-
   run_name:
     widget: "text_field"
+    header: "## Job details"
     label: "Run name"
     placeholder: "my_bioemu2_run"
     pattern: '^[A-Za-z0-9_\- ]+$'
@@ -83,40 +72,50 @@ attributes:
 
   protein_input:
     widget: "path_selector"
+    cacheable: false
+    header: "## Molecular input"
     label: "Protein input"
     placeholder: "Protein sequence, colon-separated chains, or path to FASTA"
+    popup_title: "Select a protein FASTA file"
+    show_files: true
+    show_hidden: false
     help: |
-      Enter a protein sequence, colon-separated chains, or select a FASTA file. Multiple FASTA records become separate chains.
+      Enter an amino-acid sequence, use colons to separate chains, or select a FASTA file. Multiple FASTA records become separate chains. This field may be left empty when another molecule type is supplied below.
 
   dna_input:
     widget: "text_area"
+    cacheable: false
     label: "DNA sequences (optional)"
     rows: 2
     placeholder: "CGCGAATTCGCG"
-    help: "One chain per line, or colon-separated chains."
+    help: "Optional. Use A, C, G, T, and N; put one chain per line or separate chains with colons."
 
   rna_input:
     widget: "text_area"
+    cacheable: false
     label: "RNA sequences (optional)"
     rows: 2
     placeholder: "GCGGAUUUA"
-    help: "One chain per line, or colon-separated chains."
+    help: "Optional. Use A, C, G, U, and N; put one chain per line or separate chains with colons."
 
   ligand_ccd:
     widget: "text_field"
+    cacheable: false
     label: "Ligand CCD codes (optional)"
     placeholder: "ATP, MG"
-    help: "Comma-, whitespace-, or colon-separated PDB Chemical Component Dictionary codes."
+    help: "Optional. Enter PDB Chemical Component Dictionary codes, separated by commas, spaces, or colons (for example, ATP, MG)."
 
   ligand_smiles:
     widget: "text_area"
+    cacheable: false
     label: "Ligand SMILES (optional)"
     rows: 2
     placeholder: "CC(=O)Oc1ccccc1C(=O)O"
-    help: "One ligand per line. Colons inside an atom-mapped SMILES are preserved."
+    help: "Optional. Enter one ligand SMILES per line. Colons inside atom-mapped SMILES are preserved."
 
   bioemu2_mode:
     widget: "select"
+    header: "## Prediction and sampling"
     label: "BioEmu2 task"
     options:
       - ["Structure prediction", "structure"]
@@ -137,7 +136,7 @@ attributes:
     label: "Random seeds"
     value: "1"
     pattern: '^[0-9 ,]+$'
-    help: "Comma-separated non-negative integers, for example 1,2,3."
+    help: "Comma-separated non-negative integers (for example, 1,2,3). Up to 32 unique seeds are accepted; duplicate seeds are ignored."
 
   num_recycles:
     widget: "number_field"
@@ -145,7 +144,7 @@ attributes:
     value: 10
     min: 1
     max: 30
-    help: "Trunk refinement passes. More passes increase runtime."
+    help: "Choose 1–30 trunk refinement passes. More passes increase runtime."
 
   num_diffusion_samples:
     widget: "number_field"
@@ -153,10 +152,11 @@ attributes:
     value: 5
     min: 1
     max: 100
-    help: "Total generated structures are seeds × samples per seed."
+    help: "Choose 1–100 samples per seed. Total structures are the number of unique seeds multiplied by this value."
 
   sampler:
     widget: "select"
+    header: "## Advanced settings"
     label: "Sampler"
     options:
       - ["EDM (unsteered)", "edm"]
@@ -186,6 +186,7 @@ attributes:
 
   email_on_terminated:
     widget: "check_box"
+    header: "## Notifications and citations"
     label: "Email me when the job ends"
     checked_value: true
     unchecked_value: false
