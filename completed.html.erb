@@ -1,0 +1,21 @@
+<% if !connect.user.blank? %>
+<%
+def file_url(base, path)
+  encoded = path.to_s.split("/").reject(&:empty?).map { |part| ERB::Util.url_encode(part) }.join("/")
+  "#{base}/#{encoded}"
+end
+base = connect.respond_to?(:results_url_base) && !connect.results_url_base.blank? ? connect.results_url_base : "/pun/sys/dashboard/files/fs"
+out = connect.respond_to?(:base_out_dir) && !connect.base_out_dir.blank? ? connect.base_out_dir : "/srv/scratch/#{connect.user}/bioemu2_output"
+folder = File.join(out, connect.run_dir.to_s)
+report = File.join(folder, "report.html")
+%>
+<div class="ood-appkit markdown">
+  <h4>BioEmu2 job complete</h4>
+  <% if File.file?(report) %>
+    <p><a class="btn btn-primary" target="_blank" rel="noopener" href="<%= file_url(base, report) %>">Open BioEmu2 report</a></p>
+  <% else %>
+    <p>The job ended without a generated report. Review the session log for the error.</p>
+  <% end %>
+  <p><a target="_blank" rel="noopener" href="<%= file_url(base, folder) %>">Browse all result files</a></p>
+</div>
+<% end %>

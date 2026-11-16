@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate Open OnDemand templates
+        run: ruby scripts/validate_ood_app.rb
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

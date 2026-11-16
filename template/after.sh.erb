@@ -1,0 +1,23 @@
+ENV_FILE=".env"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  . "${ENV_FILE}"
+  set +a
+fi
+
+BASE_OUT_DIR=${BASE_OUT_DIR:-/srv/scratch/${USER}/bioemu2_output}
+RESULTS_URL_BASE=${RESULTS_URL_BASE:-/pun/sys/dashboard/files/fs}
+if [[ -s run_dir.txt ]]; then
+  RUN_DIR=$(<run_dir.txt)
+else
+  SAFE_NAME=$(printf '%s' '<%= context.run_name.to_s.gsub("'", "") %>' | sed 's/[^A-Za-z0-9_-]/_/g')
+  RUN_DIR="${SAFE_NAME}_${PBS_JOBID%%.*}"
+fi
+OUT_DIR="${BASE_OUT_DIR}/${RUN_DIR}"
+ln -sfn "${OUT_DIR}" results 2>/dev/null || true
+
+export base_out_dir="${BASE_OUT_DIR}"
+export results_url_base="${RESULTS_URL_BASE}"
+export run_dir="${RUN_DIR}"
+export user="${USER}"
+export session_output_dir="$(pwd -P)"

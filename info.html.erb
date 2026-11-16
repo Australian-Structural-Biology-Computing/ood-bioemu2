@@ -1,0 +1,11 @@
+<% if !connect.user.blank? %>
+<%
+def file_url(base, path)
+  encoded = path.to_s.split("/").reject(&:empty?).map { |part| ERB::Util.url_encode(part) }.join("/")
+  "#{base}/#{encoded}"
+end
+base = connect.respond_to?(:results_url_base) && !connect.results_url_base.blank? ? connect.results_url_base : "/pun/sys/dashboard/files/fs"
+out = connect.respond_to?(:base_out_dir) && !connect.base_out_dir.blank? ? connect.base_out_dir : "/srv/scratch/#{connect.user}/bioemu2_output"
+%>
+<b>Results</b>: <a target="_blank" rel="noopener" href="<%= file_url(base, File.join(out, connect.run_dir.to_s)) %>"><%= ERB::Util.html_escape(connect.run_dir.to_s) %></a>
+<% end %>

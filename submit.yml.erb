@@ -1,0 +1,18 @@
+batch_connect:
+  template: "basic"
+  conn_params:
+    - base_out_dir
+    - results_url_base
+    - run_dir
+    - user
+    - session_output_dir
+
+script:
+  native:
+    - "-A kod_proteinfold"
+    - "-l select=1:ngpus=1:ncpus=8:mem=124gb:mwacgpu100=gpu-mwac"
+    - "-l walltime=48:00:00"
+    - "-N <%= (run_name || 'bioemu2').gsub(/[^A-Za-z0-9_.-]/, '_') %>"
+  email:
+    - "<%= ENV['USER'] %>@ad.unsw.edu.au"
+  email_on_terminated: "<%= email_on_terminated %>"

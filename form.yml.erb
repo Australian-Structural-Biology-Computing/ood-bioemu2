@@ -1,0 +1,206 @@
+<%
+require "open3"
+require "timeout"
+
+scratch_quota_warning = begin
+  Timeout.timeout(10) do
+    user = ENV.fetch("USER")
+    next unless user.match?(/\A[A-Za-z0-9._-]+\z/)
+    fileset = "user_#{user}"
+    stdout, _stderr, status = Open3.capture3(
+      "/usr/lpp/mmfs/bin/mmlsquota", "-Y", "-j", fileset, "kura_rfs2"
+    )
+    next unless status.success?
+    row = stdout.lines.map { |line| line.chomp.split(":", -1) }
+                .find { |fields| fields[2] == "0" && fields[9] == fileset }
+    next unless row
+    usage, limit, files, file_limit = row.values_at(10, 12, 15, 17).map { |v| Integer(v, exception: false) }
+    next unless usage && files && limit&.positive? && file_limit&.positive?
+    storage_pct = 100.0 * usage / limit
+    files_pct = 100.0 * files / file_limit
+    { storage: storage_pct, files: files_pct } if storage_pct > 80 || files_pct > 80
+  end
+rescue StandardError
+  nil
+end
+%>
+form:
+  - ood_user
+<% if scratch_quota_warning %>
+  - scratch_quota_warning
+<% end %>
+  - data_warning
+  - run_name
+  - protein_input
+  - dna_input
+  - rna_input
+  - ligand_ccd
+  - ligand_smiles
+  - bioemu2_mode
+  - msa_mode
+  - seeds
+  - num_recycles
+  - num_diffusion_samples
+  - sampler
+  - physicality
+  - weights_precision
+  - email_on_terminated
+  - citation_request
+  - katana_citation
+
+cluster: "katana"
+
+attributes:
+  ood_user:
+    widget: "hidden_field"
+    cacheable: false
+    value: "<%= ENV["USER"] %>"
+
+<% if scratch_quota_warning %>
+  scratch_quota_warning:
+    class: "d-none"
+    help: |
+      <div role="alert" style="padding:1rem;margin-bottom:1rem;background:#F8D7DA;border:3px solid #B00020;border-radius:.25rem;color:#721C24">
+        <b>&#9888; Your scratch quota usage is above 80%.</b>
+        Storage: <%= scratch_quota_warning[:storage].round(1) %>%; files: <%= scratch_quota_warning[:files].round(1) %>%. The run may fail if scratch space is exhausted.
+      </div>
+<% end %>
+
+  data_warning:
+    class: "d-none"
+    help: |
+      <div style="padding:.5rem .75rem;background:#E2BEBE;border:2px solid #761313;border-radius:.25rem;color:#761313">
+        <b>Warning:</b> Do not submit sensitive or highly sensitive data. Katana is not approved for those classifications.
+      </div>
+
+  run_name:
+    widget: "text_field"
+    label: "Run name"
+    placeholder: "my_bioemu2_run"
+    pattern: '^[A-Za-z0-9_\- ]+$'
+    required: true
+    help: "Letters, numbers, spaces, underscores and hyphens only."
+
+  protein_input:
+    widget: "path_selector"
+    label: "Protein input"
+    placeholder: "Protein sequence, colon-separated chains, or path to FASTA"
+    help: |
+      Enter a protein sequence, colon-separated chains, or select a FASTA file. Multiple FASTA records become separate chains.
+
+  dna_input:
+    widget: "text_area"
+    label: "DNA sequences (optional)"
+    rows: 2
+    placeholder: "CGCGAATTCGCG"
+    help: "One chain per line, or colon-separated chains."
+
+  rna_input:
+    widget: "text_area"
+    label: "RNA sequences (optional)"
+    rows: 2
+    placeholder: "GCGGAUUUA"
+    help: "One chain per line, or colon-separated chains."
+
+  ligand_ccd:
+    widget: "text_field"
+    label: "Ligand CCD codes (optional)"
+    placeholder: "ATP, MG"
+    help: "Comma-, whitespace-, or colon-separated PDB Chemical Component Dictionary codes."
+
+  ligand_smiles:
+    widget: "text_area"
+    label: "Ligand SMILES (optional)"
+    rows: 2
+    placeholder: "CC(=O)Oc1ccccc1C(=O)O"
+    help: "One ligand per line. Colons inside an atom-mapped SMILES are preserved."
+
+  bioemu2_mode:
+    widget: "select"
+    label: "BioEmu2 task"
+    options:
+      - ["Structure prediction", "structure"]
+      - ["Equilibrium ensemble sampling", "equilibrium"]
+    help: |
+      Structure mode sharpens individual folded predictions. Equilibrium mode generates independent conformations from the modelled ensemble; frames are not a time series.
+
+  msa_mode:
+    widget: "select"
+    label: "Multiple sequence alignment"
+    options:
+      - ["ColabFold MMseqs2 server", "mmseqs2_server"]
+      - ["Single sequence (no search)", "single_sequence"]
+    help: "The public server is rate limited. Single-sequence mode is faster but may reduce accuracy."
+
+  seeds:
+    widget: "text_field"
+    label: "Random seeds"
+    value: "1"
+    pattern: '^[0-9 ,]+$'
+    help: "Comma-separated non-negative integers, for example 1,2,3."
+
+  num_recycles:
+    widget: "number_field"
+    label: "Recycles"
+    value: 10
+    min: 1
+    max: 30
+    help: "Trunk refinement passes. More passes increase runtime."
+
+  num_diffusion_samples:
+    widget: "number_field"
+    label: "Samples per seed"
+    value: 5
+    min: 1
+    max: 100
+    help: "Total generated structures are seeds × samples per seed."
+
+  sampler:
+    widget: "select"
+    label: "Sampler"
+    options:
+      - ["EDM (unsteered)", "edm"]
+      - ["EDM gradient guidance", "edm_gd"]
+      - ["EDM Feynman–Kac resampling", "edm_fk"]
+      - ["Feynman–Kac corrector", "edm_fkc"]
+    help: "The unsteered EDM sampler is the recommended default. Guided presets use BioEmu2's built-in physicality potentials."
+
+  physicality:
+    widget: "select"
+    label: "Physicality checks"
+    options:
+      - ["High quality", "high_quality"]
+      - ["No violations allowed", "no_violations"]
+      - ["High quality per residue", "high_quality_per_residue"]
+      - ["Do not check", "no_filter"]
+    help: "Checks are reported per structure; failed structures remain in the output."
+
+  weights_precision:
+    widget: "select"
+    label: "Stored weight precision"
+    options:
+      - ["int8 (recommended; expanded when loaded)", "int8"]
+      - ["fp16", "fp16"]
+      - ["fp32", "fp32"]
+    help: "This controls the downloaded weight representation, not the numerical precision of inference."
+
+  email_on_terminated:
+    widget: "check_box"
+    label: "Email me when the job ends"
+    checked_value: true
+    unchecked_value: false
+
+  citation_request:
+    class: "d-none"
+    label: "Citations"
+    help: |
+      Please cite BioEmu2 and ColabFold when publishing results, and acknowledge the Structural Biology Facility:<br>
+      <i>"The authors acknowledge use of facilities in the Structural Biology Facility within the Mark Wainwright Analytical Centre - UNSW"</i><br>
+      <a href="https://github.com/microsoft/bioemu2">BioEmu2</a> · <a href="https://doi.org/10.1038/s41592-022-01488-1">ColabFold</a> · <a href="https://doi.org/10.26190/4KQF-M552">SBF DOI</a>
+
+  katana_citation:
+    class: "d-none"
+    label: "Katana citation"
+    help: |
+      <i>"This research includes computations using the computational cluster Katana supported by Research Technology Services at UNSW Sydney."</i>
+      <a href="https://doi.org/10.26190/669X-A286">10.26190/669X-A286</a>

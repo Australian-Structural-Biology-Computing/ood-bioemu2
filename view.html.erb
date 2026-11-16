@@ -1,0 +1,27 @@
+<%
+def file_url(base, path)
+  encoded = path.to_s.split("/").reject(&:empty?).map { |part| ERB::Util.url_encode(part) }.join("/")
+  "#{base}/#{encoded}"
+end
+
+def tail_text(path, max_bytes = 65536, max_lines = 120)
+  return nil unless File.file?(path)
+  File.open(path, "rb") do |file|
+    file.seek([file.size - max_bytes, 0].max)
+    text = file.read.to_s.gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
+    text.lines.last(max_lines).join
+  end
+end
+
+base = defined?(results_url_base) && results_url_base && !results_url_base.empty? ? results_url_base : "/pun/sys/dashboard/files/fs"
+out = defined?(base_out_dir) && base_out_dir && !base_out_dir.empty? ? base_out_dir : "/srv/scratch/#{user}/bioemu2_output"
+log_dir = defined?(session_output_dir) && session_output_dir && !session_output_dir.empty? ? session_output_dir : File.join(out, run_dir.to_s)
+log_path = File.join(log_dir, "live_log.log")
+text = tail_text(log_path)
+results_path = File.join(out, run_dir.to_s)
+%>
+<div class="ood-appkit markdown">
+  <p><b>Results:</b> <a target="_blank" rel="noopener" href="<%= file_url(base, results_path) %>"><%= ERB::Util.html_escape(results_path) %></a></p>
+  <p><b>Log:</b> <a target="_blank" rel="noopener" href="<%= file_url(base, log_path) %>">live_log.log</a></p>
+  <pre style="min-height:9rem;max-height:18rem;overflow:auto;padding:1rem;background:#0f172a;color:#f8fafc;border-radius:.5rem;white-space:pre-wrap;font:.9rem/1.45 ui-monospace,monospace"><%= text && !text.empty? ? ERB::Util.html_escape(text) : "Waiting for log output..." %></pre>
+</div>
