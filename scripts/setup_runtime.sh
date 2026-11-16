@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=bioemu2_weights_lib.sh
-. "${ROOT}/scripts/bioemu2_weights_lib.sh"
+# shellcheck source=../template/bioemu2_weights_lib.sh
+. "${ROOT}/template/bioemu2_weights_lib.sh"
 IMAGE=${BIOEMU2_IMAGE:-/srv/scratch/sbf-pipelines/containers/ghcr.io-jscgh-proteinfold_colabfold-af3-preview-e9e8bd0.img}
 WEIGHTS_ROOT=${BIOEMU2_WEIGHTS_ROOT:-/srv/scratch/sbf-pipelines/bioemu2/weights}
 PRECISION=${1:-int8}

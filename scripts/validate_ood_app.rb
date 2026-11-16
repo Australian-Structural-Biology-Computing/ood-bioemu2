@@ -13,6 +13,7 @@ REQUIRED = %w[
   manifest.yml form.yml.erb submit.yml.erb info.html.erb view.html.erb completed.html.erb
   template/script.sh.erb template/after.sh.erb template/connection.yml.erb template/.env
   template/bioemu2_colabfold.py template/build_report.py template/run_alphafold.py
+  template/bioemu2_weights_lib.sh
 ].freeze
 RUNNER_SHA256 = "70a1102908353d75bccfccfa85738f72d053a8fa819554c5e02e6230cc9ba86b"
 
@@ -80,6 +81,12 @@ Dir.glob(ROOT.join("template/*.sh.erb")).sort.each do |path|
   abort("Shell validation failed for #{path}: #{stderr}") unless status.success?
 end
 Dir.glob(ROOT.join("scripts/*.sh")).sort.each do |path|
+  _stdout, stderr, status = Open3.capture3("bash", "-n", path)
+  abort("Shell validation failed for #{path}: #{stderr}") unless status.success?
+end
+# Plain shell helpers that live in template/ are staged into every OOD session
+# and must be syntax-checked too (the *.sh.erb glob above does not catch them).
+Dir.glob(ROOT.join("template/*.sh")).sort.each do |path|
   _stdout, stderr, status = Open3.capture3("bash", "-n", path)
   abort("Shell validation failed for #{path}: #{stderr}") unless status.success?
 end

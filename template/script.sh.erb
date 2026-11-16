@@ -11,9 +11,12 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 OOD_SESSION_DIR=$(pwd -P)
-APP_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=../scripts/bioemu2_weights_lib.sh
-. "${APP_ROOT}/scripts/bioemu2_weights_lib.sh"
+# The gate library is staged by Open OnDemand alongside this script (everything
+# in the app's template/ directory is copied into the session), so source it
+# relative to the script itself -- never via the repository layout, which does
+# not exist inside the session (job 9805044 failed exactly there).
+# shellcheck source=bioemu2_weights_lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bioemu2_weights_lib.sh"
 BIOEMU2_IMAGE=${BIOEMU2_IMAGE:-/srv/scratch/sbf-pipelines/containers/ghcr.io-jscgh-proteinfold_colabfold-af3-preview-e9e8bd0.img}
 BIOEMU2_WEIGHTS_ROOT=${BIOEMU2_WEIGHTS_ROOT:-/srv/scratch/sbf-pipelines/bioemu2/weights}
 BIOEMU2_CACHE_ROOT=${BIOEMU2_CACHE_ROOT:-/srv/scratch/${USER}/.bioemu2/cache}

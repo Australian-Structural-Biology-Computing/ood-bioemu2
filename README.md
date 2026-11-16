@@ -103,7 +103,7 @@ The default destination is `/srv/scratch/sbf-pipelines/bioemu2/weights/int8`. Re
 `fp16` or `fp32` only if those form choices will be offered. Each representation has its own
 directory so the upstream loader cannot silently reuse a different representation.
 
-The readiness rule lives in one place, `scripts/bioemu2_weights_lib.sh`, and both this script
+The readiness rule lives in one place, `template/bioemu2_weights_lib.sh`, and both this script
 and the queued job script apply it: a precision directory must hold exactly one `*.bin.zst`
 with the published name for that representation (`bioemu2.int8.bin.zst`, `bioemu2.fp16.bin.zst`,
 `bioemu2.bin.zst` for fp32) and a plausible size. A foreign, truncated, or duplicated blob fails

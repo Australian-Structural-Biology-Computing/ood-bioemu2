@@ -25,7 +25,7 @@ RNA = frozenset("ACGUN")
 CHAIN_IDS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 CCD_RE = re.compile(r"[A-Za-z0-9]{1,8}\Z")
 JOB_RE = re.compile(r"[^A-Za-z0-9]+")
-# Mirror of scripts/bioemu2_weights_lib.sh, which this module cannot source
+# Mirror of template/bioemu2_weights_lib.sh, which this module cannot source
 # because it runs inside the container. Both gate the same published blobs, so
 # keep the two in step.
 BIOEMU2_PRECISIONS = ("int8", "fp16", "fp32")

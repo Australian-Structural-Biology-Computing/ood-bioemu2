@@ -42,6 +42,9 @@ out += ['echo "GATE_RESOLVED=${WEIGHTS_GATE_FILE}"\n',
         'echo "BIND=${WEIGHTS_BIND}${WEIGHTS_BIND_SUFFIX}"\n',
         'echo "FLAG_WEIGHTS_DIR=${WEIGHTS_GATE_ROOT}/${WEIGHTS_PRECISION}"\n']
 (tmp / "harness.sh").write_text("".join(out))
+# The rendered script sources the gate library next to itself (that is how the
+# staged session finds it), so the harness needs a copy beside harness.sh.
+(tmp / "bioemu2_weights_lib.sh").write_bytes((root / "template" / "bioemu2_weights_lib.sh").read_bytes())
 print("harness built from current source")
 PY
 

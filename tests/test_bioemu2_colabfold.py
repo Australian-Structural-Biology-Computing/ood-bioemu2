@@ -85,7 +85,7 @@ class InputTests(unittest.TestCase):
 class GateConsistencyTests(unittest.TestCase):
     """The shell gate and this module must describe the same published blobs."""
 
-    LIB = ROOT / "scripts" / "bioemu2_weights_lib.sh"
+    LIB = ROOT / "template" / "bioemu2_weights_lib.sh"
 
     def shell(self, source: str, *, allow_failure: bool = False) -> str:
         result = subprocess.run(
