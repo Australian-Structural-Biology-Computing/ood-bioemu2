@@ -87,13 +87,28 @@ if [[ -f "${PROTEIN_INPUT}" ]]; then
   PROTEIN_INPUT="${FASTA_INPUT}"
   echo "Copied selected FASTA input into the run work directory."
 fi
+# alphafold3.model.weights.ensure_weights accepts ANY *.bin.zst already present
+# in --model_dir and never re-checks the requested precision, so per-precision
+# directories only isolate the representations if the gate demands the exact
+# filename the published release uses. A stray blob of another precision must
+# fail loudly rather than be loaded silently.
 WEIGHTS_DIR="${BIOEMU2_WEIGHTS_ROOT}/${WEIGHTS_PRECISION}"
-if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" != "true" ]] && ! find "${WEIGHTS_DIR}" -maxdepth 1 -type f -name '*.bin.zst' -size +100M -print -quit 2>/dev/null | grep -q .; then
-  echo "ERROR: ${WEIGHTS_PRECISION} BioEmu2 weights are not installed in ${WEIGHTS_DIR}." >&2
-  echo "An administrator must run scripts/setup_runtime.sh in a GPU or internet-enabled allocation." >&2
-  exit 1
+WEIGHTS_FILE="${WEIGHTS_DIR}/bioemu2.${WEIGHTS_PRECISION}.bin.zst"
+[[ "${WEIGHTS_PRECISION}" == "fp32" ]] && WEIGHTS_FILE="${WEIGHTS_DIR}/bioemu2.bin.zst"
+if [[ ! -f "${WEIGHTS_FILE}" ]]; then
+  if [[ -n "$(find "${WEIGHTS_DIR}" -maxdepth 1 -type f -name '*.bin.zst' -print -quit 2>/dev/null)" ]]; then
+    echo "ERROR: ${WEIGHTS_DIR} holds weights that are not the requested ${WEIGHTS_PRECISION} set (${WEIGHTS_FILE})." >&2
+    echo "Refusing to load them: the runner would use any *.bin.zst it finds. Ask an administrator to re-run scripts/setup_runtime.sh ${WEIGHTS_PRECISION}." >&2
+    exit 1
+  fi
+  if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+    echo "BIOEMU2_ALLOW_WEIGHT_DOWNLOAD is enabled; the job will fetch any missing weights itself."
+  else
+    echo "ERROR: ${WEIGHTS_PRECISION} BioEmu2 weights are not installed at ${WEIGHTS_FILE}." >&2
+    echo "An administrator must run scripts/setup_runtime.sh ${WEIGHTS_PRECISION} once, on a node with internet access." >&2
+    exit 1
+  fi
 fi
-mkdir -p "${WEIGHTS_DIR}"
 
 if [[ "${ENABLE_METRICS}" == "true" ]]; then
   METRICS_LOG_PATH="${METRICS_DIRECTORY}/$(date +%Y/%m)"

@@ -24,10 +24,16 @@ from alphafold3.model import weights
 
 destination, precision = sys.argv[1:]
 resolved = weights.ensure_weights("bioemu2", destination, download=True, precision=precision)
-files = list(Path(resolved).glob("*.bin.zst"))
-if not files or max(path.stat().st_size for path in files) < 100_000_000:
-    raise SystemExit("BioEmu2 weight download is missing or incomplete")
-print(f"BioEmu2 {precision} weights ready in {resolved}")
+# Assert the exact published filename, not just "some big blob": the loader
+# accepts any *.bin.zst in the directory and never re-checks the precision, so a
+# directory holding the wrong representation would otherwise pass as ready.
+from alphafold3.model import model_registry
+
+wanted = model_registry.get("bioemu2").weights_file_for(precision)
+path = Path(resolved) / wanted
+if not path.is_file() or path.stat().st_size < 100_000_000:
+    raise SystemExit(f"BioEmu2 {precision} weights are missing or incomplete: expected {path}")
+print(f"BioEmu2 {precision} weights ready: {path} ({path.stat().st_size} bytes)")
 PY
 chgrp -R "${GROUP}" "${WEIGHTS_ROOT}"
 find "${WEIGHTS_ROOT}" -type d -exec chmod 2775 {} +

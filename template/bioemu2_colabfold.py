@@ -111,6 +111,34 @@ def parse_smiles(value: str) -> list[str]:
     return smiles
 
 
+def _chain_ids(chain: dict) -> list[str]:
+    """Every chain identifier carried by one entity of the AF3-dialect payload."""
+    entity = next(iter(chain.values()))
+    ident = entity.get("id")
+    if isinstance(ident, str):
+        return [ident]
+    if isinstance(ident, (list, tuple)):
+        return [str(part) for part in ident]
+    raise InputError("a chain is missing an identifier")
+
+
+def _distinct_chain_ids(chains: list[dict]) -> None:
+    """Fail loudly rather than emit chain ids the runner cannot resolve.
+
+    AlphaFold 3's Input validator assigns one asym_id per entity and then
+    requires every id in an entity's chain list to be present, so repeating an
+    id across entities raises deep inside inference. Merging identical protein
+    sequences into one entity is intended, but it must not consume an id that
+    another molecule type has already been given.
+    """
+    ids = [ident for chain in chains for ident in _chain_ids(chain)]
+    duplicates = sorted({ident for ident in ids if ids.count(ident) > 1})
+    if duplicates:
+        raise InputError(
+            "chain identifiers collided: " + ", ".join(duplicates) + "; reduce the number of chains"
+        )
+
+
 def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
     proteins = _split_polymer(args.protein, PROTEIN, "protein", allow_path=True)
     dna = _split_polymer(args.dna, DNA, "DNA")
@@ -135,9 +163,18 @@ def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
             ids = entity["id"] if isinstance(entity["id"], list) else [entity["id"]]
             entity["id"] = [*ids, chain_id]
             continue
-        entity: dict = {"id": chain_id, "sequence": sequence, "templates": []}
+        # `templates` is an AlphaFold 3 template field and BioEmu2 samples a
+        # sequence's ensemble without one, so it is only written in server MSA
+        # mode. In single-sequence mode the chain must be fully fixed instead:
+        # the runner's model_features step drops `pairedMsa` (and templates)
+        # only when `unpairedMsa` is set AND `pairedMsa` is absent, so an empty
+        # string there leaves the chain on the MSA path and it is sampled with
+        # an all-zero template feature instead of the intended one.
+        entity: dict = {"id": chain_id, "sequence": sequence}
         if args.msa_mode == "single_sequence":
-            entity.update({"unpairedMsa": f">query\n{sequence}\n", "pairedMsa": ""})
+            entity["unpairedMsa"] = f">query\n{sequence}\n"
+        else:
+            entity["templates"] = []
         protein_groups[sequence] = entity
         chains.append({"protein": entity})
     for sequence in rna:
@@ -155,6 +192,7 @@ def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
     for item in smiles:
         chains.append({"ligand": {"id": CHAIN_IDS[index], "smiles": item}})
         index += 1
+    _distinct_chain_ids(chains)
 
     flattened = json.dumps({"sequences": chains, "seeds": seeds}, sort_keys=True, separators=(",", ":"))
     base = JOB_RE.sub("", args.job_name).lower() or "bioemu2"
