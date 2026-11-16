@@ -180,18 +180,20 @@ def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
             ids = entity["id"] if isinstance(entity["id"], list) else [entity["id"]]
             entity["id"] = [*ids, chain_id]
             continue
-        # `templates` is an AlphaFold 3 template field and BioEmu2 samples a
-        # sequence's ensemble without one, so it is only written in server MSA
-        # mode. In single-sequence mode the chain must be fully fixed instead:
-        # the runner's model_features step drops `pairedMsa` (and templates)
-        # only when `unpairedMsa` is set AND `pairedMsa` is absent, so an empty
-        # string there leaves the chain on the MSA path and it is sampled with
-        # an all-zero template feature instead of the intended one.
-        entity: dict = {"id": chain_id, "sequence": sequence}
+        # Featurisation validates that every protein chain carries all three
+        # fields, and an absent one is a hard error, not a default ("Protein
+        # chain 1 is missing paired MSA" -- the first GPU smoke run, PBS job
+        # 9804946, failed exactly there). `templates: []` is the no-template
+        # representation BioEmu2 samples with, in every mode. In single-sequence
+        # mode the MSA fields must also be present: an empty `pairedMsa`
+        # featurises identically to a query-only A3M (Msa.from_a3m('') yields
+        # [query]), which is the single-sequence form, and it is what AF3's own
+        # precompile dummy input uses. In server MSA mode the fields are left
+        # absent so the runner's fill_missing_msas populates them.
+        entity: dict = {"id": chain_id, "sequence": sequence, "templates": []}
         if args.msa_mode == "single_sequence":
             entity["unpairedMsa"] = f">query\n{sequence}\n"
-        else:
-            entity["templates"] = []
+            entity["pairedMsa"] = ""
         protein_groups[sequence] = entity
         chains.append({"protein": entity})
     for sequence in rna:

@@ -41,8 +41,21 @@ class InputTests(unittest.TestCase):
         self.assertEqual(payload["modelSeeds"], [1, 2])
         protein = payload["sequences"][0]["protein"]
         self.assertEqual(protein["id"], ["A", "B"])
+        # Single-sequence mode: every field featurisation validates must be
+        # present. An empty pairedMsa featurises as a query-only MSA, which is
+        # the single-sequence form (missing fields are hard errors upstream).
         self.assertIn("unpairedMsa", protein)
+        self.assertEqual(protein["pairedMsa"], "")
+        self.assertEqual(protein["templates"], [])
         self.assertEqual(payload["sequences"][-1]["ligand"]["smiles"], "[Na+]")
+
+    def test_server_msa_mode_leaves_msa_fields_to_the_runner(self):
+        payload, _ = MODULE.build_fold_input(arguments(msa_mode="mmseqs2_server"))
+        protein = payload["sequences"][0]["protein"]
+        self.assertNotIn("unpairedMsa", protein)
+        self.assertNotIn("pairedMsa", protein)
+        # Templates must still be present: validation rejects an absent field.
+        self.assertEqual(protein["templates"], [])
 
     def test_fasta_records_become_chains(self):
         with tempfile.TemporaryDirectory() as tmp:
