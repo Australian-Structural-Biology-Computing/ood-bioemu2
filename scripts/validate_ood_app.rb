@@ -22,8 +22,7 @@ class TemplateContext
   def initialize
     @context = OpenStruct.new(
       run_name: "ci_run",
-      protein_sequence: "ACDEFGHIKLMNPQRSTVWY",
-      protein_fasta: "",
+      protein_input: "ACDEFGHIKLMNPQRSTVWY",
       dna_input: "",
       rna_input: "",
       ligand_ccd: "ATP",

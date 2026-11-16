@@ -27,8 +27,8 @@ end
 form:
   - ood_user
   - run_name
-  - protein_sequence
-  - protein_fasta
+  - protein_input
+  - protein_input_help
   - dna_input
   - rna_input
   - ligand_ccd
@@ -71,26 +71,24 @@ attributes:
     required: true
     help: "Letters, numbers, spaces, underscores and hyphens only."
 
-  protein_sequence:
-    widget: "text_area"
-    cacheable: false
-    header: "## Molecular input"
-    label: "Protein sequence(s) (optional)"
-    rows: 5
-    placeholder: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
-    help: |
-      Paste amino-acid sequences directly. Put one chain per line or separate chains with colons. Whitespace is ignored. You can also select a FASTA file below and combine its records with these sequences.
-
-  protein_fasta:
+  protein_input:
     widget: "path_selector"
     cacheable: false
-    label: "Protein FASTA file (optional)"
-    placeholder: "Select a .fa, .fasta, or other FASTA-formatted file"
+    header: "## Molecular input"
+    label: "Protein input (optional)"
+    placeholder: "path/to/protein.fasta or sequence 'NLYIQWLKDGGPSSGRPPPS'"
     popup_title: "Select a protein FASTA file"
     show_files: true
     show_hidden: false
+
+  protein_input_help:
+    class: "d-none"
+    label: "Protein input options"
     help: |
-      Select a FASTA-formatted file. Each record becomes a protein chain. Leave this empty when entering sequences directly above, or use both inputs to include both sets of chains.
+      • <b>FASTA file:</b> <code>/srv/scratch/<%= ENV["USER"] %>/protein.fasta</code>. Each FASTA record becomes a chain.
+      <br>• <b>Sequence:</b> <code>NLYIQWLKDGGPSSGRPPPS</code>
+      <br>• <b>Multiple chains:</b> <code>NLYIQWLKDGGPSSGRPPPS:MKTVRQERLKSDHELFRTHT</code>
+      <br>Use the text box for a sequence or the file picker for a FASTA file. Leave this empty when submitting only DNA, RNA, or ligand input.
 
   dna_input:
     widget: "text_area"

@@ -32,8 +32,8 @@ failed structures remain in the output.
 
 The form accepts:
 
-- protein sequences pasted directly, with one chain per line or colon-separated, and/or a
-  FASTA file whose records become additional chains;
+- protein sequences entered directly, with chains separated by colons, or a selected FASTA
+  file whose records become chains;
 - optional DNA and RNA chains;
 - optional ligands by Protein Data Bank Chemical Component Dictionary code or SMILES;
 - structure-prediction or equilibrium-ensemble mode;
@@ -43,10 +43,10 @@ The form accepts:
 
 Identical protein sequences are represented as copies of one entity, matching the notebook.
 All input is parsed into an AlphaFold-3-dialect JSON file before inference. The application
-never executes input text. Molecular input fields are not cached by Open OnDemand. Direct
-sequence input and FASTA selection are separate controls and can be used together. A selected
-FASTA file is copied into the run's private work directory, which is mounted into the container
-so the runner can read it.
+never executes input text. Molecular input fields are not cached by Open OnDemand. Following
+the established ProteinFold app pattern, one path-selector control accepts either direct
+sequence text or a FASTA path. A selected FASTA file is copied into the run's private work
+directory, which is mounted into the container so the runner can read it.
 
 ## Output layout
 
