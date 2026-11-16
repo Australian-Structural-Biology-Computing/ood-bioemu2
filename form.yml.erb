@@ -27,7 +27,8 @@ end
 form:
   - ood_user
   - run_name
-  - protein_input
+  - protein_sequence
+  - protein_fasta
   - dna_input
   - rna_input
   - ligand_ccd
@@ -70,17 +71,26 @@ attributes:
     required: true
     help: "Letters, numbers, spaces, underscores and hyphens only."
 
-  protein_input:
-    widget: "path_selector"
+  protein_sequence:
+    widget: "text_area"
     cacheable: false
     header: "## Molecular input"
-    label: "Protein input"
-    placeholder: "Protein sequence, colon-separated chains, or path to FASTA"
+    label: "Protein sequence(s) (optional)"
+    rows: 5
+    placeholder: "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ"
+    help: |
+      Paste amino-acid sequences directly. Put one chain per line or separate chains with colons. Whitespace is ignored. You can also select a FASTA file below and combine its records with these sequences.
+
+  protein_fasta:
+    widget: "path_selector"
+    cacheable: false
+    label: "Protein FASTA file (optional)"
+    placeholder: "Select a .fa, .fasta, or other FASTA-formatted file"
     popup_title: "Select a protein FASTA file"
     show_files: true
     show_hidden: false
     help: |
-      Enter an amino-acid sequence, use colons to separate chains, or select a FASTA file. Multiple FASTA records become separate chains. This field may be left empty when another molecule type is supplied below.
+      Select a FASTA-formatted file. Each record becomes a protein chain. Leave this empty when entering sequences directly above, or use both inputs to include both sets of chains.
 
   dna_input:
     widget: "text_area"

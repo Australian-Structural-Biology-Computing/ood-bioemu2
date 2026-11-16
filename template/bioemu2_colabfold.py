@@ -112,7 +112,18 @@ def parse_smiles(value: str) -> list[str]:
 
 
 def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
-    proteins = _split_polymer(args.protein, PROTEIN, "protein", allow_path=True)
+    proteins = _split_polymer(args.protein, PROTEIN, "protein")
+    protein_fasta = getattr(args, "protein_fasta", "").strip()
+    if protein_fasta:
+        fasta_path = Path(protein_fasta).expanduser()
+        if not fasta_path.is_file():
+            raise InputError(f"protein FASTA file is unavailable: {fasta_path}")
+        fasta_records = _read_fasta(fasta_path)
+        for record in fasta_records:
+            invalid = sorted(set(record) - PROTEIN)
+            if invalid:
+                raise InputError(f"protein FASTA contains unsupported characters: {''.join(invalid)}")
+        proteins.extend(fasta_records)
     dna = _split_polymer(args.dna, DNA, "DNA")
     rna = _split_polymer(args.rna, RNA, "RNA")
     ccd = parse_ccd(args.ligand_ccd)
@@ -200,6 +211,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--weights-dir", type=Path, required=True)
     result.add_argument("--job-name", required=True)
     result.add_argument("--protein", default="")
+    result.add_argument("--protein-fasta", default="")
     result.add_argument("--dna", default="")
     result.add_argument("--rna", default="")
     result.add_argument("--ligand-ccd", default="")

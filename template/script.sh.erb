@@ -79,12 +79,14 @@ command -v nvidia-smi >/dev/null || { echo "ERROR: this job did not receive an N
 nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader
 
 WEIGHTS_PRECISION=<%= Shellwords.escape(context.weights_precision.to_s) %>
-PROTEIN_INPUT=<%= Shellwords.escape(context.protein_input.to_s) %>
-if [[ "${PROTEIN_INPUT}" == /* && -f "${PROTEIN_INPUT}" ]]; then
+PROTEIN_SEQUENCE=<%= Shellwords.escape(context.protein_sequence.to_s) %>
+PROTEIN_FASTA=<%= Shellwords.escape(context.protein_fasta.to_s) %>
+if [[ -n "${PROTEIN_FASTA}" ]]; then
+  [[ -f "${PROTEIN_FASTA}" ]] || { echo "ERROR: selected protein FASTA file is unavailable: ${PROTEIN_FASTA}" >&2; exit 2; }
   FASTA_INPUT="${WORK_DIR}/protein_input.fasta"
-  cp -- "${PROTEIN_INPUT}" "${FASTA_INPUT}"
+  cp -- "${PROTEIN_FASTA}" "${FASTA_INPUT}"
   chmod 600 "${FASTA_INPUT}"
-  PROTEIN_INPUT="${FASTA_INPUT}"
+  PROTEIN_FASTA="${FASTA_INPUT}"
   echo "Copied selected FASTA input into the run work directory."
 fi
 WEIGHTS_DIR="${BIOEMU2_WEIGHTS_ROOT}/${WEIGHTS_PRECISION}"
@@ -133,7 +135,8 @@ apptainer exec --nv --cleanenv \
     --cache-dir "${BIOEMU2_CACHE_ROOT}" \
     --weights-dir "${BIOEMU2_WEIGHTS_ROOT}" \
     --job-name <%= Shellwords.escape(context.run_name.to_s) %> \
-    --protein "${PROTEIN_INPUT}" \
+    --protein "${PROTEIN_SEQUENCE}" \
+    --protein-fasta "${PROTEIN_FASTA}" \
     --dna <%= Shellwords.escape(context.dna_input.to_s) %> \
     --rna <%= Shellwords.escape(context.rna_input.to_s) %> \
     --ligand-ccd <%= Shellwords.escape(context.ligand_ccd.to_s) %> \
