@@ -11,6 +11,9 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 OOD_SESSION_DIR=$(pwd -P)
+APP_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=../scripts/bioemu2_weights_lib.sh
+. "${APP_ROOT}/scripts/bioemu2_weights_lib.sh"
 BIOEMU2_IMAGE=${BIOEMU2_IMAGE:-/srv/scratch/sbf-pipelines/containers/ghcr.io-jscgh-proteinfold_colabfold-af3-preview-e9e8bd0.img}
 BIOEMU2_WEIGHTS_ROOT=${BIOEMU2_WEIGHTS_ROOT:-/srv/scratch/sbf-pipelines/bioemu2/weights}
 BIOEMU2_CACHE_ROOT=${BIOEMU2_CACHE_ROOT:-/srv/scratch/${USER}/.bioemu2/cache}
@@ -33,6 +36,20 @@ LIVE_LOG="${OOD_SESSION_DIR}/live_log.log"
 METRICS_FILE=""
 
 mkdir -p "${OUT_DIR}" "${WORK_DIR}" "${BIOEMU2_CACHE_ROOT}"
+# The shared weight root is bind-mounted read-only into the container, so a job
+# can never write a downloaded blob into administrator-owned state. When
+# downloads are permitted the job instead fetches into its own private copy of
+# the exact file the gate expects: the upstream loader takes any *.bin.zst in
+# --model_dir without re-checking the precision, so that copy must be named
+# precisely.
+DOWNLOAD_ARGS=()
+if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+  DOWNLOAD_ARGS=(--allow-weight-download)
+fi
+# Location for the shared cross-job lock taken by scripts/setup_runtime.sh. It
+# must sit somewhere ordinary users may create files: the shared weight root is
+# administrator owned and bind-mounted read-only into jobs.
+export BIOEMU2_LOCK_DIR="${BASE_WORK_DIR}"
 exec > >(tee -a "${LIVE_LOG}")
 exec 2>&1
 
@@ -79,6 +96,13 @@ command -v nvidia-smi >/dev/null || { echo "ERROR: this job did not receive an N
 nvidia-smi --query-gpu=name,compute_cap,memory.total --format=csv,noheader
 
 WEIGHTS_PRECISION=<%= Shellwords.escape(context.weights_precision.to_s) %>
+# The shared root is read-only to jobs, so a job that is permitted to download
+# fetches into its own private copy instead of writing into administrator-owned
+# state. Declared next to the precision it is derived from.
+WEIGHTS_GATE_ROOT="${BIOEMU2_WEIGHTS_ROOT}"
+if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+  WEIGHTS_GATE_ROOT="${WORK_DIR}/weights"
+fi
 PROTEIN_INPUT=<%= Shellwords.escape(context.protein_input.to_s) %>
 if [[ -f "${PROTEIN_INPUT}" ]]; then
   FASTA_INPUT="${WORK_DIR}/protein_input.fasta"
@@ -90,24 +114,79 @@ fi
 # alphafold3.model.weights.ensure_weights accepts ANY *.bin.zst already present
 # in --model_dir and never re-checks the requested precision, so per-precision
 # directories only isolate the representations if the gate demands the exact
-# filename the published release uses. A stray blob of another precision must
-# fail loudly rather than be loaded silently.
-WEIGHTS_DIR="${BIOEMU2_WEIGHTS_ROOT}/${WEIGHTS_PRECISION}"
-WEIGHTS_FILE="${WEIGHTS_DIR}/bioemu2.${WEIGHTS_PRECISION}.bin.zst"
-[[ "${WEIGHTS_PRECISION}" == "fp32" ]] && WEIGHTS_FILE="${WEIGHTS_DIR}/bioemu2.bin.zst"
-if [[ ! -f "${WEIGHTS_FILE}" ]]; then
-  if [[ -n "$(find "${WEIGHTS_DIR}" -maxdepth 1 -type f -name '*.bin.zst' -print -quit 2>/dev/null)" ]]; then
-    echo "ERROR: ${WEIGHTS_DIR} holds weights that are not the requested ${WEIGHTS_PRECISION} set (${WEIGHTS_FILE})." >&2
-    echo "Refusing to load them: the runner would use any *.bin.zst it finds. Ask an administrator to re-run scripts/setup_runtime.sh ${WEIGHTS_PRECISION}." >&2
-    exit 1
-  fi
-  if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
-    echo "BIOEMU2_ALLOW_WEIGHT_DOWNLOAD is enabled; the job will fetch any missing weights itself."
+# filename the published release uses and refuses a foreign blob outright.
+# bioemu2_gate_weights is the same rule scripts/setup_runtime.sh applies, so the
+# two callers cannot drift apart.
+WEIGHTS_DIR="$(bioemu2_weights_dir "${BIOEMU2_WEIGHTS_ROOT}" "${WEIGHTS_PRECISION}")"
+WEIGHTS_GATE_REASON=''
+WEIGHTS_GATE_FILE=''
+bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE
+# Capture the status on its own line. Immediately after `bioemu2_gate_weights` a
+# word `case` would be parsed as a NEW pattern-clause header rather than the
+# `in` of `case $? in`, which silently swallows the whole gate block and still
+# passes `bash -n`.
+WEIGHTS_GATE_STATUS=$?
+if [[ "${WEIGHTS_GATE_STATUS}" == 1 && "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+  # Before spending an allocation on a multi-hundred-megabyte download, check
+  # whether the administrator has already staged exactly what was asked for.
+  # The job loads from its own private --model_dir either way, so a different
+  # representation in the shared root cannot leak into this run; it is only
+  # worth adopting when it is the one the user selected.
+  SHARED_REASON=''
+  SHARED_FILE=''
+  if bioemu2_gate_weights "${BIOEMU2_WEIGHTS_ROOT}" "${WEIGHTS_PRECISION}" SHARED_REASON SHARED_FILE; then
+    echo "BioEmu2 ${WEIGHTS_PRECISION} weights already installed by the administrator: ${SHARED_FILE}"
+    WEIGHTS_GATE_ROOT="${BIOEMU2_WEIGHTS_ROOT}"
+    WEIGHTS_GATE_FILE="${SHARED_FILE}"
+    WEIGHTS_GATE_STATUS=0
   else
-    echo "ERROR: ${WEIGHTS_PRECISION} BioEmu2 weights are not installed at ${WEIGHTS_FILE}." >&2
-    echo "An administrator must run scripts/setup_runtime.sh ${WEIGHTS_PRECISION} once, on a node with internet access." >&2
-    exit 1
+    echo "NOTE: shared root has no usable ${WEIGHTS_PRECISION} weights (${SHARED_REASON}); falling back to a private download."
   fi
+fi
+case "${WEIGHTS_GATE_STATUS}" in
+  0) echo "BioEmu2 ${WEIGHTS_PRECISION} weights: ${WEIGHTS_GATE_FILE}";;
+  1)
+    if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+      # The precedence check above already proved the shared root is empty, so
+      # only the private directory has to be usable. Gate it before committing
+      # the allocation to a multi-hundred-megabyte download that would otherwise
+      # fail at weight-load time, deep into the run.
+      bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE
+      WEIGHTS_DOWNLOAD_STATUS=$?
+      if [[ "${WEIGHTS_DOWNLOAD_STATUS}" != 1 ]]; then
+        echo "ERROR: ${WEIGHTS_GATE_REASON}" >&2
+        echo "Refusing to download into ${WEIGHTS_GATE_ROOT}." >&2
+        exit 1
+      fi
+      echo "WARNING: ${WEIGHTS_GATE_REASON}; BIOEMU2_ALLOW_WEIGHT_DOWNLOAD is enabled, so this job will fetch them into ${WEIGHTS_GATE_ROOT}/${WEIGHTS_PRECISION} and pay the download time."
+      if ! mkdir -p "$(bioemu2_weights_dir "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}")"; then
+        echo "ERROR: unable to create the private weight directory under ${WEIGHTS_GATE_ROOT}." >&2
+        exit 1
+      fi
+    else
+      echo "ERROR: ${WEIGHTS_GATE_REASON}." >&2
+      echo "An administrator must run scripts/setup_runtime.sh ${WEIGHTS_PRECISION} once, on a node with internet access." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    # Unusable shared state: an unsupported representation, or a stray blob the
+    # loader would silently pick up. A per-job download cannot fix either.
+    echo "ERROR: ${WEIGHTS_GATE_REASON}" >&2
+    echo "Refusing to run: the runner would load any *.bin.zst it finds in ${WEIGHTS_DIR}. Ask an administrator to re-run scripts/setup_runtime.sh ${WEIGHTS_PRECISION}." >&2
+    exit 1
+    ;;
+esac
+
+# Bind exactly the root the job reads from: the shared one read-only, or the
+# job's own private copy when it is permitted to download into it. Computed here
+# rather than before the gate because the precedence check may adopt the shared
+# root for a job that arrived willing to download.
+WEIGHTS_BIND="${WEIGHTS_GATE_ROOT}"
+if [[ "${WEIGHTS_GATE_ROOT}" == "${BIOEMU2_WEIGHTS_ROOT}" ]]; then
+  WEIGHTS_BIND_SUFFIX=":ro"
+else
+  WEIGHTS_BIND_SUFFIX=""
 fi
 
 if [[ "${ENABLE_METRICS}" == "true" ]]; then
@@ -124,7 +203,9 @@ if [[ "${ENABLE_METRICS}" == "true" ]]; then
 fi
 
 ALLOW_DOWNLOAD=()
-[[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]] && ALLOW_DOWNLOAD+=(--allow-weight-download)
+if [[ "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
+  ALLOW_DOWNLOAD=("${DOWNLOAD_ARGS[@]}")
+fi
 export APPTAINER_CACHEDIR=${APPTAINER_CACHEDIR:-/srv/scratch/${USER}/.images}
 export APPTAINER_TMPDIR=${APPTAINER_TMPDIR:-${TMPDIR:-/srv/scratch/${USER}/.images/tmp}}
 mkdir -p "${APPTAINER_CACHEDIR}" "${APPTAINER_TMPDIR}"
@@ -139,14 +220,14 @@ apptainer exec --nv --cleanenv \
   --bind "${OUT_DIR}:${OUT_DIR}" \
   --bind "${WORK_DIR}:${WORK_DIR}" \
   --bind "${BIOEMU2_CACHE_ROOT}:${BIOEMU2_CACHE_ROOT}" \
-  --bind "${BIOEMU2_WEIGHTS_ROOT}:${BIOEMU2_WEIGHTS_ROOT}" \
+  --bind "${WEIGHTS_BIND}:${WEIGHTS_BIND}${WEIGHTS_BIND_SUFFIX}" \
   "${BIOEMU2_IMAGE}" \
   python "${OOD_SESSION_DIR}/bioemu2_colabfold.py" \
     --runner "${OOD_SESSION_DIR}/run_alphafold.py" \
     --output-dir "${OUT_DIR}" \
     --work-dir "${WORK_DIR}" \
     --cache-dir "${BIOEMU2_CACHE_ROOT}" \
-    --weights-dir "${BIOEMU2_WEIGHTS_ROOT}" \
+    --weights-dir "${WEIGHTS_GATE_ROOT}" \
     --job-name <%= Shellwords.escape(context.run_name.to_s) %> \
     --protein "${PROTEIN_INPUT}" \
     --dna <%= Shellwords.escape(context.dna_input.to_s) %> \

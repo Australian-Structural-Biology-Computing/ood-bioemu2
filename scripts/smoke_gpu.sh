@@ -9,7 +9,7 @@ OUT=${1:-/srv/scratch/${USER}/bioemu2-smoke-${PBS_JOBID%%.*}}
 CACHE=${BIOEMU2_CACHE_ROOT:-/srv/scratch/${USER}/.bioemu2/cache}
 mkdir -p "${OUT}" "${OUT}/work" "${CACHE}"
 apptainer exec --nv --cleanenv \
-  --bind "${ROOT}:${ROOT}:ro" --bind "${OUT}:${OUT}" --bind "${CACHE}:${CACHE}" --bind "${WEIGHTS}:${WEIGHTS}" \
+  --bind "${ROOT}:${ROOT}:ro" --bind "${OUT}:${OUT}" --bind "${CACHE}:${CACHE}" --bind "${WEIGHTS}:${WEIGHTS}:ro" \
   "${IMAGE}" python "${ROOT}/template/bioemu2_colabfold.py" \
   --runner "${ROOT}/template/run_alphafold.py" --output-dir "${OUT}/results" --work-dir "${OUT}/work" \
   --cache-dir "${CACHE}" --weights-dir "${WEIGHTS}" --job-name smoke \

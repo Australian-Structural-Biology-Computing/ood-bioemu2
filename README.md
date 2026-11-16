@@ -103,6 +103,13 @@ The default destination is `/srv/scratch/sbf-pipelines/bioemu2/weights/int8`. Re
 `fp16` or `fp32` only if those form choices will be offered. Each representation has its own
 directory so the upstream loader cannot silently reuse a different representation.
 
+The readiness rule lives in one place, `scripts/bioemu2_weights_lib.sh`, and both this script
+and the queued job script apply it: a precision directory must hold exactly one `*.bin.zst`
+with the published name for that representation (`bioemu2.int8.bin.zst`, `bioemu2.fp16.bin.zst`,
+`bioemu2.bin.zst` for fp32) and a plausible size. A foreign, truncated, or duplicated blob fails
+the job with the recovery step instead of being loaded silently. `scripts/check_gate_branches.sh`
+replays every gate decision against the rendered job template without needing a GPU.
+
 Keep this production setting:
 
 ```bash
@@ -163,13 +170,15 @@ Run the CPU-only checks on a login/development host:
 
 ```bash
 ruby scripts/validate_ood_app.rb
-python3 -m unittest discover -s tests -v
+python3.12 -m unittest discover -s tests -v
+bash scripts/check_gate_branches.sh
 ```
 
 The validator renders the OOD templates, parses YAML, syntax-checks shell and Python files,
 and verifies the upstream runner checksum. Unit tests cover FASTA/direct input, chain
-construction, ligand parsing, seed bounds, validation failures, and report behaviour when
-confidence values are unavailable.
+construction, ligand parsing, seed bounds, validation failures, report behaviour when
+confidence values are unavailable, and agreement between the shell weight gate and the
+precision list compiled into the Python wrapper.
 
 These checks do not perform inference. Use `scripts/smoke_gpu.sh` in an allocated GPU job for
 the end-to-end test.

@@ -25,6 +25,10 @@ RNA = frozenset("ACGUN")
 CHAIN_IDS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 CCD_RE = re.compile(r"[A-Za-z0-9]{1,8}\Z")
 JOB_RE = re.compile(r"[^A-Za-z0-9]+")
+# Mirror of scripts/bioemu2_weights_lib.sh, which this module cannot source
+# because it runs inside the container. Both gate the same published blobs, so
+# keep the two in step.
+BIOEMU2_PRECISIONS = ("int8", "fp16", "fp32")
 
 
 class InputError(ValueError):
@@ -139,6 +143,19 @@ def _distinct_chain_ids(chains: list[dict]) -> None:
         )
 
 
+def weights_dir_for(precision: str) -> Path:
+    """The per-precision directory under the shared weight root.
+
+    Derived here rather than in the job script so the directory a run loads from
+    is decided in exactly one place. A foreign representation must never share a
+    directory with the wanted one: upstream's loader takes any *.bin.zst it
+    finds and does not re-check the precision.
+    """
+    if precision not in BIOEMU2_PRECISIONS:
+        raise InputError(f"weights precision must be one of {', '.join(BIOEMU2_PRECISIONS)}")
+    return Path(".") / precision
+
+
 def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
     proteins = _split_polymer(args.protein, PROTEIN, "protein", allow_path=True)
     dna = _split_polymer(args.dna, DNA, "DNA")
@@ -249,7 +266,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--mode", choices=("structure", "equilibrium"), default="structure")
     result.add_argument("--sampler", choices=("edm", "edm_gd", "edm_fk", "edm_fkc"), default="edm")
     result.add_argument("--physicality", choices=("high_quality", "no_violations", "high_quality_per_residue", "no_filter"), default="high_quality")
-    result.add_argument("--weights-precision", choices=("int8", "fp16", "fp32"), default="int8")
+    result.add_argument("--weights-precision", choices=BIOEMU2_PRECISIONS, default="int8")
     result.add_argument("--allow-weight-download", action="store_true")
     return result
 
@@ -267,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.work_dir.mkdir(parents=True, exist_ok=True)
     args.cache_dir.mkdir(parents=True, exist_ok=True)
-    precision_weights = args.weights_dir / args.weights_precision
+    precision_weights = args.weights_dir / weights_dir_for(args.weights_precision)
     precision_weights.mkdir(parents=True, exist_ok=True)
     input_path = args.work_dir / f"{job_name}.json"
     input_path.write_text(json.dumps(fold_input, indent=2) + "\n", encoding="utf-8")
