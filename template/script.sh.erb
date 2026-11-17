@@ -59,23 +59,31 @@ exec 2>&1
 collect_debug_files() {
   local status=$?
   trap - ERR
-  set +e
-  echo "BioEmu2 failed (exit ${status}); copying bounded diagnostics to ${DEBUGDIR}"
-  mkdir -p "${DEBUGDIR}"
-  {
-    echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "user=${USER}"
-    echo "node=$(hostname)"
-    echo "pbs_jobid=${PBS_JOBID:-}"
-    echo "run_id=${RUN_ID}"
-    echo "image=${BIOEMU2_IMAGE}"
-    echo "exit_code=${status}"
-  } > "${DEBUGDIR}/debug-metadata.txt"
-  cp -f "${LIVE_LOG}" "${DEBUGDIR}/" 2>/dev/null || true
-  rsync -a --no-perms --no-owner --no-group --max-size=50m "${OUT_DIR}/" "${DEBUGDIR}/output/" 2>/dev/null || true
-  chgrp "${DEBUGGROUP}" -R "${DEBUGDIR}" 2>/dev/null || true
-  find "${DEBUGDIR}" -type d -exec chmod 2770 {} + 2>/dev/null || true
-  find "${DEBUGDIR}" -type f -exec chmod 660 {} + 2>/dev/null || true
+  # The diagnostics copy runs in a subshell. `set +e` inside a trap handler
+  # LEAKS into the parent shell and silently disables errexit for the rest of
+  # the script -- job 9800577 failed at the fold and still printed "completed
+  # successfully", wrote run_dir.txt, and exited 0 because of exactly that.
+  # The subshell contains the relaxed error handling; the parent keeps errexit
+  # and exits with the failing command's status once the handler returns.
+  (
+    set +e
+    echo "BioEmu2 failed (exit ${status}); copying bounded diagnostics to ${DEBUGDIR}"
+    mkdir -p "${DEBUGDIR}"
+    {
+      echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "user=${USER}"
+      echo "node=$(hostname)"
+      echo "pbs_jobid=${PBS_JOBID:-}"
+      echo "run_id=${RUN_ID}"
+      echo "image=${BIOEMU2_IMAGE}"
+      echo "exit_code=${status}"
+    } > "${DEBUGDIR}/debug-metadata.txt"
+    cp -f "${LIVE_LOG}" "${DEBUGDIR}/" 2>/dev/null || true
+    rsync -a --no-perms --no-owner --no-group --max-size=50m "${OUT_DIR}/" "${DEBUGDIR}/output/" 2>/dev/null || true
+    chgrp "${DEBUGGROUP}" -R "${DEBUGDIR}" 2>/dev/null || true
+    find "${DEBUGDIR}" -type d -exec chmod 2770 {} + 2>/dev/null || true
+    find "${DEBUGDIR}" -type f -exec chmod 660 {} + 2>/dev/null || true
+  )
   return "${status}"
 }
 trap collect_debug_files ERR
