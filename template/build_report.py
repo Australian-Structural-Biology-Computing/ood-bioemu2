@@ -74,7 +74,7 @@ def aggregate_metric(summaries: list[dict], key: str) -> float | None:
     return sum(numbers) / len(numbers) if numbers else None
 
 
-def load_combined_frames(frames: list[Path]) -> tuple[object, int, bool] | None:
+def load_combined_frames(frames: list[Path], frame_meta: list[dict]) -> tuple[object, int, bool, list[dict]] | None:
     """Parse every frame into one multi-model Structure, shared by the PDB
     bundle and the preview. Best effort by contract -- returns None on any
     problem and never lets an exception reach the report. Returns the
@@ -96,12 +96,15 @@ def load_combined_frames(frames: list[Path]) -> tuple[object, int, bool] | None:
         combined = Structure(id="ensemble")
         model_id = 0
         truncated = False
-        for frame in frames:
+        loaded_meta: list[dict] = []
+        for index, frame in enumerate(frames):
             if model_id >= MAX_BUNDLE_MODELS:
                 truncated = True  # frames remain unattempted
                 break
+            meta = frame_meta[index] if index < len(frame_meta) else None
             try:
                 structure = parser.get_structure("frame", str(frame))
+                frame_models = 0
                 for model in structure:
                     if model_id >= MAX_BUNDLE_MODELS:
                         truncated = True  # models of this frame dropped
@@ -111,11 +114,16 @@ def load_combined_frames(frames: list[Path]) -> tuple[object, int, bool] | None:
                     clone.parent = combined
                     combined.add(clone)
                     model_id += 1
+                    frame_models += 1
+                # one manifest entry per loaded model keeps the viewer's
+                # labels in 1:1 correspondence with what is on screen
+                if meta is not None and frame_models:
+                    loaded_meta.extend([meta] * frame_models)
             except Exception:
                 continue  # one unreadable frame must not sink the bundle
         if model_id == 0:
             return None
-        return combined, model_id, truncated
+        return combined, model_id, truncated, loaded_meta
     except Exception:
         # Memory pressure, a biopython defect, a full disk: the report is the
         # deliverable, the bundle is a convenience.
@@ -270,6 +278,14 @@ def viewer_js_source() -> Path | None:
     return None
 
 
+def script_json(value: object) -> str:
+    """JSON for embedding inside a <script> element: json.dumps leaves "<"
+    literal, so a filename or reason containing "</script>" would terminate
+    the element and inject markup. Escaping every "<" as \\u003c is
+    identity for the parsed value and safe inside JS string literals."""
+    return json.dumps(value).replace("<", "\\u003c")
+
+
 def interactive_viewer_block(root: Path, bundle: Path | None,
                              frame_meta: list[dict]) -> tuple[str, bool]:
     """The 3Dmol.js card for the report: the vendored viewer is INLINED into
@@ -306,8 +322,9 @@ def interactive_viewer_block(root: Path, bundle: Path | None,
         '<div id="ensemble-viewer" style="width:100%;height:440px;position:relative"></div>'
         f'<input id="frame-slider" type="range" min="0" max="{frame_count - 1}" value="0" style="width:100%">'
         '<div id="frame-label" class="muted"></div>'
-        "<script>var frameMeta = " + json.dumps(frame_meta) + ";</script>"
-        "<script>var ensemblePdbData = " + json.dumps(data) + ";</script>"
+        '<p><button id="ensemble-download">Download all frames (PDB)</button></p>'
+        "<script>var frameMeta = " + script_json(frame_meta) + ";</script>"
+        "<script>var ensemblePdbData = " + script_json(data) + ";</script>"
         "<script>"
         "(function(){"
         'var holder=document.getElementById("ensemble-viewer");'
@@ -322,9 +339,10 @@ def interactive_viewer_block(root: Path, bundle: Path | None,
         "viewer.zoomTo();viewer.render();"
         'var slider=document.getElementById("frame-slider");'
         'var label=document.getElementById("frame-label");'
+        'var frameTotal=frameMeta.length;'
         'function show(i){viewer.setFrame(i);viewer.render();'
         'var m=frameMeta[i]||{};var t=(m.time_ns!==undefined)?" · t = "+m.time_ns+" ns":"";'
-        'label.textContent="frame "+(i+1)+" of "+slider.max'
+        'label.textContent="frame "+(i+1)+" of "+frameTotal'
         '+(m.seed!==undefined?" — seed "+m.seed:"")'
         '+(m.step!==undefined?" · step "+m.step:"")+t;}'
         'slider.addEventListener("input",function(){show(parseInt(slider.value,10))});'
@@ -334,7 +352,7 @@ def interactive_viewer_block(root: Path, bundle: Path | None,
         'var a=document.createElement("a");a.href=URL.createObjectURL(blob);'
         'a.download="ensemble.pdb";a.click();URL.revokeObjectURL(a.href);});}'
         "show(0);"
-        "}catch(error){holder.innerHTML=" + json.dumps("Interactive view failed: ") + "+error;}"
+        "}catch(error){holder.innerHTML=" + script_json("Interactive view failed: ") + "+error;}"
         "})();"
         "</script>"
     )
@@ -363,58 +381,15 @@ def build(root: Path) -> tuple[str, dict]:
     # The bundle holds the per-sample frames; the job-level CIF duplicates one
     # of them and would repeat a model.
     frames = [path for path in cifs if SAMPLE_RE.search(str(path))] or cifs
-    loaded = load_combined_frames(frames)
-    bundle = preview = None
-    bundle_models = 0
-    bundle_truncated = False
-    rmsd_stats = {"mean_pairwise": None, "max_pairwise": None, "frames_compared": 0}
-    if loaded:
-        combined, bundle_models, bundle_truncated = loaded
-        bundle = write_ensemble_bundle(root, str(job_name), combined)
-        traces = ca_traces(combined)
-        rmsd = pairwise_ca_rmsd(traces)
-        if rmsd is not None:
-            import numpy
-
-            upper = rmsd[numpy.triu_indices_from(rmsd, k=1)]
-            rmsd_stats = {
-                "mean_pairwise": float(upper.mean()) if upper.size else None,
-                "max_pairwise": float(upper.max()) if upper.size else None,
-                "frames_compared": int(rmsd.shape[0]),
-            }
-        preview = write_ensemble_preview(root, str(job_name), traces, rmsd)
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [(path, load_json(path)) for path in physicality_files]
     physicality_by_frame = frame_physicality(physicality)
-    physicality_counts: dict[str, int] = {}
-    for entry in physicality_by_frame.values():
-        status = str(entry.get("status", "unknown"))
-        physicality_counts[status] = physicality_counts.get(status, 0) + 1
-    physicality_passed = physicality_counts.get("passed", 0)
-    physicality_failed = physicality_counts.get("failed", 0)
-    physicality_unknown = len(physicality_by_frame) - physicality_passed - physicality_failed
-    ranking_files = sorted(job_dir.rglob("*_ranking_scores.csv")) if job_dir.is_dir() else []
-    ranking_rows: list[dict] = []
-    if ranking_files:
-        try:
-            with ranking_files[0].open(newline="", encoding="utf-8") as handle:
-                ranking_rows = list(csv.DictReader(handle))[:100]
-        except OSError:
-            ranking_rows = []
-
-    # NaN must count as absent: json round-trips it, and a single NaN sample
-    # would otherwise suppress the "no confidence head" warning.
-    def meaningful(value: object) -> bool:
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value) and value != 0)
-
-    no_confidence = not any(meaningful(value) for value in metrics.values())
 
     lag_ns = metadata.get("lag_ns") or 0
-    # Frame manifest: one entry per trajectory frame, in walking order. Seeds
-    # are INDEPENDENT trajectories -- for a propagated run the step counter
-    # and simulated time restart at every seed, and the presentation must
-    # never imply one continuous kinetic path across a seed boundary.
+    # Frame manifest FIRST: one entry per trajectory frame, in walking order.
+    # Seeds are INDEPENDENT trajectories -- for a propagated run the step
+    # counter and simulated time restart at every seed, and the presentation
+    # must never imply one continuous kinetic path across a seed boundary.
     frame_meta: list[dict] = []
     for path in cifs:
         match = SAMPLE_RE.search(str(path))
@@ -441,6 +416,51 @@ def build(root: Path) -> tuple[str, dict]:
                 entry["physicality_reason"] = str(physicality_entry["reason"])
         frame_meta.append(entry)
 
+    loaded = load_combined_frames(frames, frame_meta)
+    bundle = preview = None
+    bundle_models = 0
+    bundle_truncated = False
+    loaded_meta: list[dict] = []
+    rmsd_stats = {"mean_pairwise": None, "max_pairwise": None, "frames_compared": 0}
+    if loaded:
+        combined, bundle_models, bundle_truncated, loaded_meta = loaded
+        bundle = write_ensemble_bundle(root, str(job_name), combined)
+        traces = ca_traces(combined)
+        rmsd = pairwise_ca_rmsd(traces)
+        if rmsd is not None:
+            import numpy
+
+            upper = rmsd[numpy.triu_indices_from(rmsd, k=1)]
+            rmsd_stats = {
+                "mean_pairwise": float(upper.mean()) if upper.size else None,
+                "max_pairwise": float(upper.max()) if upper.size else None,
+                "frames_compared": int(rmsd.shape[0]),
+            }
+        preview = write_ensemble_preview(root, str(job_name), traces, rmsd)
+    physicality_counts: dict[str, int] = {}
+    for entry in physicality_by_frame.values():
+        status = str(entry.get("status", "unknown"))
+        physicality_counts[status] = physicality_counts.get(status, 0) + 1
+    physicality_passed = physicality_counts.get("passed", 0)
+    physicality_failed = physicality_counts.get("failed", 0)
+    physicality_unknown = len(physicality_by_frame) - physicality_passed - physicality_failed
+    ranking_files = sorted(job_dir.rglob("*_ranking_scores.csv")) if job_dir.is_dir() else []
+    ranking_rows: list[dict] = []
+    if ranking_files:
+        try:
+            with ranking_files[0].open(newline="", encoding="utf-8") as handle:
+                ranking_rows = list(csv.DictReader(handle))[:100]
+        except OSError:
+            ranking_rows = []
+
+    # NaN must count as absent: json round-trips it, and a single NaN sample
+    # would otherwise suppress the "no confidence head" warning.
+    def meaningful(value: object) -> bool:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value != 0)
+
+    no_confidence = not any(meaningful(value) for value in metrics.values())
+
     def frame_label(meta: dict) -> str:
         label = meta["path"]
         if propagating:
@@ -452,11 +472,12 @@ def build(root: Path) -> tuple[str, dict]:
             label += verdict
         return label
 
-    seeds = sorted({meta["seed"] for meta in frame_meta})
+    seeds = sorted({meta["seed"] for meta in loaded_meta})
     frame_rows = []
+    skipped_frames = len(frame_meta) - len(loaded_meta)
     if propagating and len(seeds) > 1:
         for seed in seeds:
-            group = [meta for meta in frame_meta if meta["seed"] == seed]
+            group = [meta for meta in loaded_meta if meta["seed"] == seed]
             total_time = group[-1]["time_ns"] if propagating and group else 0
             frame_rows.append(
                 f'<li class="seed-group">Seed {seed} — independent trajectory '
@@ -471,11 +492,14 @@ def build(root: Path) -> tuple[str, dict]:
         frame_rows.extend(
             f'<li><a href="{html.escape(relative_link(root / meta["path"], root), quote=True)}">'
             f'{html.escape(frame_label(meta))}</a></li>'
-            for meta in frame_meta
+            for meta in loaded_meta
         )
     file_rows = "".join(frame_rows) or "<li>No CIF files found.</li>"
+    if skipped_frames:
+        file_rows += (f'<li class="muted">{skipped_frames} frame(s) could not be parsed for the '
+                      f'viewer and bundle; the files remain in the archive above.</li>')
     interactive_block, interactive_js = interactive_viewer_block(
-        root, bundle, frame_meta)
+        root, bundle, loaded_meta)
 
     heading = {
         "trajectory": "Trajectory frames",

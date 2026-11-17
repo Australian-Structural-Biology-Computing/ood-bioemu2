@@ -449,7 +449,7 @@ class ReportTests(unittest.TestCase):
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
             job = root / "job"
             for step in (0, 1):
-                (job / f"job_seed-1_sample-{step}_model.cif").write_text("data_test\n", encoding="utf-8")
+                write_frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
             (job / "job_seed-1_sample-0_physicality.json").write_text(
                 json.dumps({"seed": 1, "sample": 0, "status": "passed",
                             "mode": "high_quality", "stats": {"has_clash": 0.0}}),
@@ -506,6 +506,83 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(report["interactive_viewer"])
             self.assertIn("// custom viewer build", document)
 
+    def test_unreadable_frame_is_excluded_from_manifest_and_listed(self):
+        # The viewer, bundle, frame list, and manifest must describe the SAME
+        # frames: a frame that fails to parse is dropped from all of them, and
+        # the omission is stated rather than silently shifting every label.
+        try:
+            from Bio.PDB import MMCIFIO
+            from Bio.PDB.Structure import Structure
+            from Bio.PDB.Model import Model
+            from Bio.PDB.Chain import Chain
+            from Bio.PDB.Residue import Residue
+            from Bio.PDB.Atom import Atom
+        except ImportError:
+            self.skipTest("biopython unavailable on this host")
+
+        def frame_cif(path: Path) -> None:
+            structure = Structure("frame")
+            model = Model(0)
+            chain = Chain("A")
+            residue = Residue((" ", 1, " "), "ALA", " ")
+            for index, name in enumerate(("N", "CA", "C")):
+                residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
+            chain.add(residue)
+            model.add(chain)
+            structure.add(model)
+            io = MMCIFIO()
+            io.set_structure(structure)
+            io.save(str(path))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            frame_cif(job / "job_seed-1_sample-0_model.cif")
+            (job / "job_seed-1_sample-1_model.cif").write_text("garbage\n", encoding="utf-8")
+            frame_cif(job / "job_seed-1_sample-2_model.cif")
+            document, report = REPORT.build(root)
+            manifest = json.loads(re.search(
+                r"<script>var frameMeta = (\[.*?\]);</script>", document).group(1))
+            self.assertEqual([m["sample"] for m in manifest], [0, 2])
+            self.assertIn("1 frame(s) could not be parsed", document)
+            self.assertNotIn("sample-1", document.split("Interactive 3D view")[1].split("</ul>")[0])
+
+    def test_viewer_label_counts_frames_not_slider_bounds(self):
+        # "frame 10 of 9" was the old off-by-one: the total is the manifest
+        # length, not the slider maximum.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            for sample in (0, 1, 2):
+                write_frame_cif(job / f"job_seed-1_sample-{sample}_model.cif")
+            document, _ = REPORT.build(root)
+        self.assertIn("var frameTotal=frameMeta.length", document)
+        self.assertNotIn('" of "+slider.max', document)
+
+    def test_download_button_element_is_emitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            write_frame_cif(job / "job_seed-1_sample-0_model.cif")
+            document, _ = REPORT.build(root)
+        self.assertIn('id="ensemble-download"', document)
+
+    def test_script_embedded_json_is_terminated_safe(self):
+        # A reason containing "</script>" must not terminate the inline script
+        # or inject markup: every "<" in embedded JSON escapes to \u003c.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            write_frame_cif(job / "job_seed-1_sample-0_model.cif")
+            (job / "job_seed-1_sample-0_physicality.json").write_text(
+                json.dumps({"seed": 1, "sample": 0, "status": "failed",
+                            "reason": 'clash</script><script>alert(1)</script>'}),
+                encoding="utf-8",
+            )
+            document, _ = REPORT.build(root)
+        self.assertIn("clash\\u003c/script>", document)
+        self.assertNotIn("clash</script>", document)
+
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
@@ -551,11 +628,12 @@ class ReportTests(unittest.TestCase):
             })
             job = root / "job"
             for step in (0, 1, 2):
-                (job / f"job_seed-1_sample-{step}_model.cif").write_text("data_test\n", encoding="utf-8")
+                write_frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
             document, report = REPORT.build(root)
         self.assertIn("<h2>Trajectory frames</h2>", document)
         self.assertIn("step 2, t = 4 ns", document)
         self.assertIn("step 1, t = 2 ns", document)
+        self.assertIn("step 3, t = 6 ns", document)
         self.assertNotIn("t = 0 ns", document)  # sample-0 is one lag after the start
         self.assertEqual(report["kind"], "trajectory")
 
