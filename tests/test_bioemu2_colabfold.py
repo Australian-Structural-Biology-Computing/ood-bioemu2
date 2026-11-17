@@ -21,6 +21,29 @@ assert REPORT_SPEC.loader
 REPORT_SPEC.loader.exec_module(REPORT)
 
 
+def write_frame_cif(path: Path) -> None:
+    """A valid single-chain mmCIF written by biopython itself (three CA atoms)."""
+    from Bio.PDB import MMCIFIO
+    from Bio.PDB.Structure import Structure
+    from Bio.PDB.Model import Model
+    from Bio.PDB.Chain import Chain
+    from Bio.PDB.Residue import Residue
+    from Bio.PDB.Atom import Atom
+
+    structure = Structure("frame")
+    model = Model(0)
+    chain = Chain("A")
+    residue = Residue((" ", 1, " "), "ALA", " ")
+    for index, name in enumerate(("N", "CA", "C")):
+        residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
+    chain.add(residue)
+    model.add(chain)
+    structure.add(model)
+    io = MMCIFIO()
+    io.set_structure(structure)
+    io.save(str(path))
+
+
 def arguments(**overrides):
     values = dict(
         protein="ACDE:ACDE",
@@ -351,26 +374,14 @@ class ReportTests(unittest.TestCase):
         except ImportError:
             self.skipTest("biopython unavailable on this host")
 
-        def frame_cif(path: Path) -> None:
-            structure = Structure("frame")
-            model = Model(0)
-            chain = Chain("A")
-            residue = Residue((" ", 1, " "), "ALA", " ")
-            for index, name in enumerate(("N", "CA", "C")):
-                residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
-            chain.add(residue)
-            model.add(chain)
-            structure.add(model)
-            io = MMCIFIO()
-            io.set_structure(structure)
-            io.save(str(path))
+            write_write_frame_cif(path)
 
         total = REPORT.MAX_BUNDLE_MODELS + 5
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
             job = root / "job"
             for step in range(total):
-                frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
+                write_frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
             document, report = REPORT.build(root)
             self.assertEqual(report["ensemble_bundle_frames"], REPORT.MAX_BUNDLE_MODELS)
             self.assertTrue(report["ensemble_bundle_truncated"])
@@ -394,26 +405,14 @@ class ReportTests(unittest.TestCase):
         except ImportError:
             self.skipTest("biopython unavailable on this host")
 
-        def frame_cif(path: Path) -> None:
-            structure = Structure("frame")
-            model = Model(0)
-            chain = Chain("A")
-            residue = Residue((" ", 1, " "), "ALA", " ")
-            for index, name in enumerate(("N", "CA", "C")):
-                residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
-            chain.add(residue)
-            model.add(chain)
-            structure.add(model)
-            io = MMCIFIO()
-            io.set_structure(structure)
-            io.save(str(path))
+            write_write_frame_cif(path)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
             job = root / "job"
-            frame_cif(job / "job_seed-1_sample-0_model.cif")
+            write_frame_cif(job / "job_seed-1_sample-0_model.cif")
             (job / "job_seed-1_sample-1_model.cif").write_text("this is not a CIF\n", encoding="utf-8")
-            frame_cif(job / "job_seed-1_sample-2_model.cif")
+            write_frame_cif(job / "job_seed-1_sample-2_model.cif")
             document, report = REPORT.build(root)
             self.assertFalse(report["ensemble_bundle_truncated"])
             self.assertEqual(report["ensemble_bundle_frames"], 2)
@@ -442,6 +441,42 @@ class ReportTests(unittest.TestCase):
         self.assertIn("physicality: failed (atom clash)", document)
         self.assertIn("1 of 2 frames passed the high_quality physicality screen", document)
         self.assertEqual(report["physicality_summary"], {"passed": 1, "failed": 1, "frames": 2})
+
+    def test_interactive_viewer_uses_the_vendored_script(self):
+        # Once vendored into template/, build_report.py finds 3Dmol.min.js next
+        # to itself and ships it beside the report.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            write_frame_cif(job / "job_seed-1_sample-0_model.cif")
+            document, report = REPORT.build(root)
+            self.assertTrue(report["interactive_viewer"])
+            self.assertIn("Interactive 3D view", document)
+            self.assertIn('src="3Dmol.min.js"', document)
+            self.assertIn("ensemblePdbData", document)
+            self.assertTrue((root / "3Dmol.min.js").is_file())
+
+    def test_interactive_viewer_override_env(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            dummy = Path(tmp) / "custom" / "3Dmol.min.js"
+            dummy.parent.mkdir()
+            dummy.write_text("// custom viewer build\n" * 64, encoding="utf-8")
+            root = self.stage(str(tmp) + "/run", {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            write_frame_cif(job / "job_seed-1_sample-0_model.cif")
+            saved = os.environ.get("BIOEMU2_3DMOL_JS")
+            os.environ["BIOEMU2_3DMOL_JS"] = str(dummy)
+            try:
+                document, report = REPORT.build(root)
+            finally:
+                if saved is None:
+                    os.environ.pop("BIOEMU2_3DMOL_JS", None)
+                else:
+                    os.environ["BIOEMU2_3DMOL_JS"] = saved
+            self.assertTrue(report["interactive_viewer"])
+            copied = root / "3Dmol.min.js"
+            self.assertIn("// custom viewer build", copied.read_text(encoding="utf-8"))
 
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -536,27 +571,13 @@ class ReportTests(unittest.TestCase):
         except ImportError:
             self.skipTest("biopython unavailable on this host")
 
-        def frame_cif(path: Path) -> None:
-            """A valid single-chain mmCIF written by biopython itself."""
-            structure = Structure("frame")
-            model = Model(0)
-            chain = Chain("A")
-            residue = Residue((" ", 1, " "), "ALA", " ")
-            for index, name in enumerate(("N", "CA", "C")):
-                atom = Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N")
-                residue.add(atom)
-            chain.add(residue)
-            model.add(chain)
-            structure.add(model)
-            io = MMCIFIO()
-            io.set_structure(structure)
-            io.save(str(path))
+            write_write_frame_cif(path)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
             job = root / "job"
             for step in (0, 1):
-                frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
+                write_frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
             document, report = REPORT.build(root)
             self.assertIsNotNone(report["ensemble_bundle"])
             self.assertIn("ensemble.pdb", document)

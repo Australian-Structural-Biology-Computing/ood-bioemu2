@@ -8,6 +8,7 @@ import csv
 import html
 import json
 import math
+import os
 import re
 from pathlib import Path
 from urllib.parse import quote
@@ -245,6 +246,84 @@ def frame_physicality(entries: list[tuple[Path, object]]) -> dict[tuple[int, int
     return keyed
 
 
+VIEWER_JS_NAME = "3Dmol.min.js"
+MAX_INLINE_PDB_BYTES = 20 * 1024 * 1024
+
+
+def viewer_js_source() -> Path | None:
+    """Locate the vendored 3Dmol.js. An explicit BIOEMU2_3DMOL_JS override is
+    checked first (tests use it), then the directory this script runs from --
+    Open OnDemand stages the whole template/ directory into the session, so
+    the vendored copy is always beside build_report.py."""
+    candidates: list[Path] = []
+    override = os.environ.get("BIOEMU2_3DMOL_JS")
+    if override:
+        candidates.append(Path(override))
+    candidates.append(Path(__file__).resolve().parent / VIEWER_JS_NAME)
+    candidates.append(Path.cwd() / VIEWER_JS_NAME)
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 1024:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) -> tuple[str, bool]:
+    """The 3Dmol.js card for the report: the vendored viewer script is copied
+    next to report.html (same origin, no external service), the bundled PDB
+    is inlined as JSON, and a slider flips through the frames. Best effort --
+    any problem returns an empty fragment and the static preview remains."""
+    if bundle is None or frame_count < 1:
+        return "", False
+    source = viewer_js_source()
+    if source is None:
+        return "", False
+    try:
+        data = bundle.read_text(encoding="utf-8")
+    except OSError:
+        return "", False
+    if len(data.encode("utf-8")) > MAX_INLINE_PDB_BYTES:
+        return "", False
+    try:
+        import shutil
+
+        shutil.copyfile(source, root / VIEWER_JS_NAME)
+    except OSError:
+        return "", False
+
+    noun = "frame" if frame_count == 1 else "frames"
+    fragment = (
+        "<h2>Interactive 3D view</h2>"
+        '<p class="muted">Drag to rotate, scroll to zoom, and use the slider to flip through the '
+        f"{frame_count} {noun}. Rendered locally by the vendored 3Dmol.js; no external service is contacted.</p>"
+        f'<script src="{VIEWER_JS_NAME}"></script>'
+        '<div id="ensemble-viewer" style="width:100%;height:440px;position:relative"></div>'
+        f'<input id="frame-slider" type="range" min="0" max="{frame_count - 1}" value="0" style="width:100%">'
+        '<div id="frame-label" class="muted"></div>'
+        "<script>var ensemblePdbData = " + json.dumps(data) + ";</script>"
+        "<script>"
+        "(function(){"
+        'var holder=document.getElementById("ensemble-viewer");'
+        'if(typeof $3Dmol==="undefined"){holder.innerHTML="3Dmol.js failed to load.";return;}'
+        "try{"
+        'var viewer=$3Dmol.createViewer(holder,{backgroundColor:"white"});'
+        'viewer.addModelsAsFrames(ensemblePdbData,"pdb");'
+        'viewer.setStyle({},{cartoon:{color:"spectrum"}});'
+        "viewer.zoomTo();viewer.render();"
+        'var slider=document.getElementById("frame-slider");'
+        'var label=document.getElementById("frame-label");'
+        'function show(i){viewer.setModel(i);label.textContent="frame "+i+" of "+slider.max;}'
+        'slider.addEventListener("input",function(){show(parseInt(slider.value,10))});'
+        "show(0);"
+        "}catch(error){holder.innerHTML=" + json.dumps("Interactive view failed: ") + "+error;}"
+        "})();"
+        "</script>"
+    )
+    return fragment, True
+
+
 def build(root: Path) -> tuple[str, dict]:
     metadata = load_json_dict(root / "run_metadata.json")
     job_name = metadata.get("job_name", "")
@@ -287,6 +366,8 @@ def build(root: Path) -> tuple[str, dict]:
                 "frames_compared": int(rmsd.shape[0]),
             }
         preview = write_ensemble_preview(root, str(job_name), traces, rmsd)
+    interactive_block, interactive_js = interactive_viewer_block(
+        root, bundle, bundle_models if bundle else 0)
 
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [(path, load_json(path)) for path in physicality_files]
@@ -426,6 +507,7 @@ def build(root: Path) -> tuple[str, dict]:
         "ensemble_bundle": bundle.relative_to(root).as_posix() if bundle else None,
         "ensemble_bundle_frames": bundle_models if bundle else 0,
         "ensemble_bundle_truncated": bundle_truncated,
+        "interactive_viewer": bool(interactive_js),
         "preview": preview.relative_to(root).as_posix() if preview else None,
         "rmsd": rmsd_stats,
         "physicality_reports": [path.relative_to(root).as_posix() for path in physicality_files],
@@ -447,7 +529,7 @@ def build(root: Path) -> tuple[str, dict]:
 <tr><th>Stored weights</th><td>{html.escape(display(metadata.get('weights_precision')))}</td></tr>
 <tr><th>Structures</th><td>{len(cifs)}</td></tr></table></div>
 <div class="card"><h2>{html.escape(summary_heading)}</h2>{confidence_note}<table>{metric_rows}</table><p>{html.escape(physicality_note)}</p></div>
-<div class="card"><h2>{html.escape(heading)}</h2>{f'<p>{html.escape(framing_note)}</p>' if framing_note else ''}{f'<p class="muted">{html.escape(spread_note)}</p>' if spread_note else ''}{preview_img}<ul>{file_rows}{bundle_row}</ul></div>
+<div class="card"><h2>{html.escape(heading)}</h2>{f'<p>{html.escape(framing_note)}</p>' if framing_note else ''}{f'<p class="muted">{html.escape(spread_note)}</p>' if spread_note else ''}{preview_img}{interactive_block}<ul>{file_rows}{bundle_row}</ul></div>
 <div class="card">{ranking_table}<p><a href="report.json">Machine-readable report</a> · <a href="fold_input.json">Resolved fold input</a> · <a href="run_metadata.json">Run metadata</a></p></div>
 </main></body></html>"""
     return document, report
