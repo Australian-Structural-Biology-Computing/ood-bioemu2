@@ -10,18 +10,29 @@ RESULTS_URL_BASE=${RESULTS_URL_BASE:-/pun/sys/dashboard/files/fs}
 if [[ -s run_dir.txt ]]; then
   RUN_DIR=$(<run_dir.txt)
 else
-  # run_dir.txt is written by the job as soon as its output directory exists,
-  # so reaching here means it died before that. The live log then still names
-  # the directory the run was about to use -- prefer it over guessing.
+  # This script is sourced by the Open OnDemand wrapper immediately after it
+  # LAUNCHES script.sh in the background -- not after the job completes (the
+  # wrapper then writes connection.yml, which is what the completed view
+  # reads). The job writes run_dir.txt within its first seconds, so wait
+  # briefly for it rather than guessing.
   SAFE_NAME=$(printf '%s' '<%= context.run_name.to_s.gsub("'", "") %>' | sed 's/[^A-Za-z0-9_-]/_/g')
-  LOGGED_DIR=$(sed -n 's/^BioEmu2 output: //p' "$(pwd -P)/live_log.log" 2>/dev/null | tail -1)
-  if [[ -n "${LOGGED_DIR}" ]]; then
-    RUN_DIR=$(basename "${LOGGED_DIR}")
+  for _ in $(seq 1 30); do
+    [[ -s run_dir.txt ]] && break
+    sleep 1
+  done
+  if [[ -s run_dir.txt ]]; then
+    RUN_DIR=$(<run_dir.txt)
   else
-    # Effectively unreachable: only a crash before the job's first echo lands
-    # here. The session directory is named after a UUID, which cannot
-    # reconstruct the job number, so this names the run without one.
-    RUN_DIR="${SAFE_NAME}_$(basename "$(pwd -P)")"
+    # The job died before publishing anything. PBS_JOBID IS defined here --
+    # this whole wrapper is the PBS job -- and "${SAFE_NAME}_${PBS_JOBID%%.*}"
+    # is exactly what script.sh would have computed, so it is the best
+    # remaining guess (and correct for every failure after the first lines).
+    LOGGED_DIR=$(sed -n 's/^BioEmu2 output: //p' "$(pwd -P)/live_log.log" 2>/dev/null | tail -1)
+    if [[ -n "${LOGGED_DIR}" ]]; then
+      RUN_DIR=$(basename "${LOGGED_DIR}")
+    else
+      RUN_DIR="${SAFE_NAME}_${PBS_JOBID%%.*}"
+    fi
   fi
 fi
 OUT_DIR="${BASE_OUT_DIR}/${RUN_DIR}"

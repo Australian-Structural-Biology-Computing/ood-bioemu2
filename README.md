@@ -182,6 +182,8 @@ Run the CPU-only checks on a login/development host:
 ruby scripts/validate_ood_app.rb
 python3.12 -m unittest discover -s tests -v
 bash scripts/check_gate_branches.sh
+bash scripts/check_err_trap.sh
+bash scripts/check_after_run_dir.sh
 ```
 
 The validator renders the OOD templates, parses YAML, syntax-checks shell and Python files,
