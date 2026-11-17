@@ -7,8 +7,12 @@ import argparse
 import csv
 import html
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
+
+SAMPLE_RE = re.compile(r"seed-(\d+)_sample-(\d+)")
+METRIC_KEYS = ("mean_plddt", "ptm", "iptm", "ranking_score")
 
 
 def load_json(path: Path) -> dict:
@@ -32,13 +36,92 @@ def relative_link(path: Path, root: Path) -> str:
     return "/".join(quote(part) for part in relative.split("/"))
 
 
+def sample_order(path: Path) -> tuple[int, int, str]:
+    """Sort key that orders frames numerically: sample-2 before sample-10.
+
+    Lexicographic sorting puts sample-10 before sample-2, which for a
+    propagated trajectory presents time backwards.
+    """
+    match = SAMPLE_RE.search(str(path))
+    if match:
+        return (int(match.group(1)), int(match.group(2)), str(path))
+    return (1 << 30, 0, str(path))  # job-level files last
+
+
+def aggregate_metric(summaries: list[dict], key: str) -> float | None:
+    """Mean of the numeric values one metric takes across samples.
+
+    Averaging matters once a run produces many frames; absent values stay
+    absent rather than becoming an arbitrary sample's value.
+    """
+    numbers = [value for value in (summary.get(key) for summary in summaries)
+               if isinstance(value, (int, float))]
+    return sum(numbers) / len(numbers) if numbers else None
+
+
+def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> Path | None:
+    """One multi-model PDB holding every frame, for viewers that load a whole
+    ensemble or trajectory at once. Uses the container's biopython; skipped
+    (never fatal) when it is unavailable or a frame cannot be parsed."""
+    if not frames:
+        return None
+    try:
+        import copy
+
+        from Bio.PDB import MMCIFParser, PDBIO
+        from Bio.PDB.Structure import Structure
+    except ImportError:
+        return None
+    parser = MMCIFParser(QUIET=True)
+    combined = Structure(id="ensemble")
+    model_id = 0
+    for frame in frames:
+        try:
+            structure = parser.get_structure("frame", str(frame))
+        except Exception:
+            continue
+        for model in structure:
+            clone = copy.deepcopy(model)
+            clone.id = model_id
+            clone.parent = combined
+            combined.add(clone)
+            model_id += 1
+    if model_id == 0:
+        return None
+    out = root / f"{job_name}_ensemble.pdb"
+    try:
+        io = PDBIO()
+        io.set_structure(combined)
+        io.save(str(out))
+    except Exception:
+        return None
+    return out
+
+
 def build(root: Path) -> tuple[str, dict]:
     metadata = load_json(root / "run_metadata.json")
     job_name = metadata.get("job_name", "")
     job_dir = root / str(job_name)
+    mode = metadata.get("mode", "structure")
+    propagating = bool(metadata.get("propagation_steps"))
+    kind = "trajectory" if propagating else ("ensemble" if mode == "equilibrium" else "structure")
+
     summaries = sorted(job_dir.rglob("*_summary_confidences.json")) if job_dir.is_dir() else []
-    summary = load_json(summaries[0]) if summaries else {}
-    cifs = sorted(job_dir.rglob("*.cif")) if job_dir.is_dir() else []
+    summaries_data = [load_json(path) for path in summaries]
+    summary = summaries_data[0] if summaries_data else {}
+    # Aggregate the per-sample summaries; the job-level file covers the same
+    # frames again and would double-count them in the mean. It stays the
+    # raw summary in report.json for compatibility.
+    sample_summaries = [data for path, data in zip(summaries, summaries_data)
+                        if SAMPLE_RE.search(str(path))] or summaries_data
+    metrics = {key: aggregate_metric(sample_summaries, key) for key in METRIC_KEYS}
+
+    cifs = sorted(job_dir.rglob("*.cif"), key=sample_order) if job_dir.is_dir() else []
+    # The bundle holds the per-sample frames; the job-level CIF duplicates one
+    # of them and would repeat a model.
+    frames = [path for path in cifs if SAMPLE_RE.search(str(path))] or cifs
+    bundle = write_ensemble_bundle(root, str(job_name), frames)
+
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [load_json(path) for path in physicality_files]
     ranking_files = sorted(job_dir.rglob("*_ranking_scores.csv")) if job_dir.is_dir() else []
@@ -50,17 +133,31 @@ def build(root: Path) -> tuple[str, dict]:
         except OSError:
             ranking_rows = []
 
-    metrics = {
-        "mean_plddt": summary.get("mean_plddt"),
-        "ptm": summary.get("ptm"),
-        "iptm": summary.get("iptm"),
-        "ranking_score": summary.get("ranking_score"),
-    }
     no_confidence = not any(value not in (None, 0, 0.0) for value in metrics.values())
-    file_rows = "".join(
-        f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(path.relative_to(root).as_posix())}</a></li>'
-        for path in cifs
-    ) or "<li>No CIF files found.</li>"
+
+    lag_ns = metadata.get("lag_ns") or 0
+    frame_rows = []
+    for path in cifs:
+        label = path.relative_to(root).as_posix()
+        if propagating:
+            match = SAMPLE_RE.search(label)
+            if match:
+                step = int(match.group(2))
+                label += f" — step {step}, t = {step * float(lag_ns):g} ns"
+        frame_rows.append(
+            f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(label)}</a></li>'
+        )
+    file_rows = "".join(frame_rows) or "<li>No CIF files found.</li>"
+
+    heading = {
+        "trajectory": "Trajectory frames",
+        "ensemble": "Ensemble samples",
+    }.get(kind, "Structures")
+    framing_note = {
+        "trajectory": "Frames are ordered in time, one per propagation step; this is a sampled trajectory, not a physically integrated dynamics run.",
+        "ensemble": "Independent samples of the equilibrium ensemble. They are equiprobable draws, not a time series, and are not ranked.",
+    }.get(kind)
+
     propagation = metadata.get("propagation_steps")
     propagation_row = (
         f"<tr><th>Trajectory</th><td>{html.escape(str(metadata.get('propagation_steps')))} steps "
@@ -68,13 +165,16 @@ def build(root: Path) -> tuple[str, dict]:
         f"{html.escape(str(metadata.get('propagate_from')))}</td></tr>"
         if propagation else ""
     )
+    summary_heading = "Model summary"
+    if len(sample_summaries) > 1:
+        summary_heading += f" (mean over {len(sample_summaries)} samples)"
     metric_rows = "".join(
-        f"<tr><th>{html.escape(label)}</th><td>{html.escape(display(value))}</td></tr>"
-        for label, value in (
-            ("Mean pLDDT", metrics["mean_plddt"]),
-            ("pTM", metrics["ptm"]),
-            ("ipTM", metrics["iptm"]),
-            ("Ranking score", metrics["ranking_score"]),
+        f"<tr><th>{html.escape(label)}</th><td>{html.escape(display(metrics[key]))}</td></tr>"
+        for label, key in (
+            ("Mean pLDDT", "mean_plddt"),
+            ("pTM", "ptm"),
+            ("ipTM", "iptm"),
+            ("Ranking score", "ranking_score"),
         )
     )
     confidence_note = (
@@ -87,8 +187,17 @@ def build(root: Path) -> tuple[str, dict]:
         if physicality_files else
         "No separate physicality JSON was found; inspect the job log before using these structures."
     )
+
+    # Ranking is a structure-prediction concept. Ensemble draws are
+    # equiprobable and trajectory frames are time-ordered; with the confidence
+    # head absent every score is NaN anyway, and presenting them under a
+    # "Ranking" heading invites exactly the wrong reading.
+    any_score = any(
+        isinstance(row.get("ranking_score"), (int, float)) and row["ranking_score"] == row["ranking_score"]
+        for row in ranking_rows
+    )
     ranking_table = ""
-    if ranking_rows:
+    if ranking_rows and (kind == "structure" or any_score):
         columns = list(ranking_rows[0])
         ranking_table = "<h2>Ranking</h2><div class='scroll'><table><thead><tr>" + "".join(
             f"<th>{html.escape(column)}</th>" for column in columns
@@ -97,11 +206,19 @@ def build(root: Path) -> tuple[str, dict]:
             for row in ranking_rows
         ) + "</tbody></table></div>"
 
+    bundle_row = (
+        f'<li><a href="{html.escape(relative_link(bundle, root), quote=True)}">{html.escape(bundle.name)}</a>'
+        f" — all frames as one multi-model file</li>" if bundle else ""
+    )
     report = {
         "metadata": metadata,
         "summary": summary,
+        "summary_metrics": metrics,
+        "summary_samples": len(sample_summaries),
+        "kind": kind,
         "confidence_available": not no_confidence,
         "structures": [path.relative_to(root).as_posix() for path in cifs],
+        "ensemble_bundle": bundle.relative_to(root).as_posix() if bundle else None,
         "physicality_reports": [path.relative_to(root).as_posix() for path in physicality_files],
         "ranking": ranking_rows,
     }
@@ -115,8 +232,8 @@ def build(root: Path) -> tuple[str, dict]:
 <tr><th>MSA</th><td>{html.escape(display(metadata.get('msa_mode')))}</td></tr>
 <tr><th>Stored weights</th><td>{html.escape(display(metadata.get('weights_precision')))}</td></tr>
 <tr><th>Structures</th><td>{len(cifs)}</td></tr></table></div>
-<div class="card"><h2>Model summary</h2>{confidence_note}<table>{metric_rows}</table><p>{html.escape(physicality_note)}</p></div>
-<div class="card"><h2>Structures</h2><ul>{file_rows}</ul></div>
+<div class="card"><h2>{html.escape(summary_heading)}</h2>{confidence_note}<table>{metric_rows}</table><p>{html.escape(physicality_note)}</p></div>
+<div class="card"><h2>{html.escape(heading)}</h2>{f'<p>{html.escape(framing_note)}</p>' if framing_note else ''}<ul>{file_rows}{bundle_row}</ul></div>
 <div class="card">{ranking_table}<p><a href="report.json">Machine-readable report</a> · <a href="fold_input.json">Resolved fold input</a> · <a href="run_metadata.json">Run metadata</a></p></div>
 </main></body></html>"""
     return document, report

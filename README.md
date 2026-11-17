@@ -64,12 +64,17 @@ Each run writes to:
 Important files include:
 
 - `report.html` and `report.json` — static summary and machine-readable index;
+- `<job-name>_<hash>` ensemble bundle written alongside them — a multi-model PDB
+  holding every frame, loadable in VMD, PyMOL, or MDAnalysis as one file;
 - `fold_input.json` — resolved molecular input and seeds;
 - `run_metadata.json` — pinned runtime, options, and executed argument vector;
 - `<job-name>_<hash>/` — ColabFold result tree with CIF structures, ranking files,
   physicality records, and any model-produced metadata.
 
 The report links individual CIF files and explicitly marks unavailable confidence metrics.
+It frames the output by task: structure runs keep the ranking table; equilibrium runs
+present their samples as an ensemble (equiprobable draws, not ranked); propagation runs
+present time-ordered trajectory frames, one per step, labelled with simulated time.
 Input sequence text is not written to central metrics or debug metadata. It remains in the
 user-owned run directory and bounded failure diagnostics.
 

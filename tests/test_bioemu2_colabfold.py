@@ -297,22 +297,138 @@ class PropagationTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    """The report frames output the way the science actually behaves."""
+
+    @staticmethod
+    def stage(tmp: str, metadata: dict) -> Path:
+        root = Path(tmp)
+        job = root / str(metadata.get("job_name", "job"))
+        job.mkdir(parents=True)
+        (job / "job_summary_confidences.json").write_text(
+            json.dumps({"mean_plddt": 0, "ptm": 0}), encoding="utf-8"
+        )
+        (root / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        return root
+
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            job = root / "job_abc"
-            job.mkdir()
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
             (job / "sample.cif").write_text("data_test\n", encoding="utf-8")
-            (job / "job_summary_confidences.json").write_text(
-                json.dumps({"mean_plddt": 0, "ptm": 0}), encoding="utf-8"
-            )
-            (root / "run_metadata.json").write_text(
-                json.dumps({"job_name": "job_abc", "mode": "equilibrium"}), encoding="utf-8"
-            )
             document, report = REPORT.build(root)
         self.assertIn("Confidence head unavailable", document)
         self.assertFalse(report["confidence_available"])
-        self.assertEqual(report["structures"], ["job_abc/sample.cif"])
+        self.assertEqual(report["structures"], ["job/sample.cif"])
+
+    def test_structure_mode_keeps_the_ranking_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "structure"})
+            job = root / "job"
+            (job / "job_seed-1_sample-0_model.cif").write_text("data_test\n", encoding="utf-8")
+            (job / "job_ranking_scores.csv").write_text(
+                "seed,sample,ranking_score\n1,0,nan\n", encoding="utf-8"
+            )
+            document, report = REPORT.build(root)
+        self.assertIn("<h2>Ranking</h2>", document)
+        self.assertIn("<h2>Structures</h2>", document)
+        self.assertEqual(report["kind"], "structure")
+
+    def test_equilibrium_mode_frames_samples_as_an_ensemble(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            (job / "job_seed-1_sample-0_model.cif").write_text("data_test\n", encoding="utf-8")
+            (job / "job_ranking_scores.csv").write_text(
+                "seed,sample,ranking_score\n1,0,nan\n", encoding="utf-8"
+            )
+            document, report = REPORT.build(root)
+        self.assertIn("<h2>Ensemble samples</h2>", document)
+        self.assertIn("not a time series, and are not ranked", document)
+        self.assertNotIn("<h2>Ranking</h2>", document)
+        self.assertEqual(report["kind"], "ensemble")
+
+    def test_propagation_mode_labels_time_ordered_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {
+                "job_name": "job", "mode": "equilibrium",
+                "propagation_steps": 3, "lag_ns": 2.0, "propagate_from": "/x/start.cif",
+            })
+            job = root / "job"
+            for step in (0, 1, 2):
+                (job / f"job_seed-1_sample-{step}_model.cif").write_text("data_test\n", encoding="utf-8")
+            document, report = REPORT.build(root)
+        self.assertIn("<h2>Trajectory frames</h2>", document)
+        self.assertIn("step 2, t = 4 ns", document)
+        self.assertEqual(report["kind"], "trajectory")
+
+    def test_frames_sort_numerically_past_sample_nine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            for step in (0, 2, 10):
+                (job / f"job_seed-1_sample-{step}_model.cif").write_text("data_test\n", encoding="utf-8")
+            _, report = REPORT.build(root)
+        self.assertEqual(
+            [Path(name).name for name in report["structures"]],
+            ["job_seed-1_sample-0_model.cif", "job_seed-1_sample-2_model.cif",
+             "job_seed-1_sample-10_model.cif"],
+        )
+
+    def test_metrics_average_across_sample_summaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            (job / "job_summary_confidences.json").write_text(
+                json.dumps({"mean_plddt": 10}), encoding="utf-8"
+            )
+            for step, value in ((0, 10), (1, 20)):
+                sub = job / f"seed-1_sample-{step}"
+                sub.mkdir()
+                (sub / f"job_seed-1_sample-{step}_summary_confidences.json").write_text(
+                    json.dumps({"mean_plddt": value}), encoding="utf-8"
+                )
+            _, report = REPORT.build(root)
+        # The job-level file repeats the frames; the mean must not double-count.
+        self.assertEqual(report["summary_metrics"]["mean_plddt"], 15.0)
+        self.assertEqual(report["summary_samples"], 2)
+
+    def test_ensemble_bundle_written_when_biopython_present(self):
+        try:
+            from Bio.PDB import MMCIFIO, PDBParser
+            from Bio.PDB.Structure import Structure
+            from Bio.PDB.Model import Model
+            from Bio.PDB.Chain import Chain
+            from Bio.PDB.Residue import Residue
+            from Bio.PDB.Atom import Atom
+        except ImportError:
+            self.skipTest("biopython unavailable on this host")
+
+        def frame_cif(path: Path) -> None:
+            """A valid single-chain mmCIF written by biopython itself."""
+            structure = Structure("frame")
+            model = Model(0)
+            chain = Chain("A")
+            residue = Residue((" ", 1, " "), "ALA", " ")
+            for index, name in enumerate(("N", "CA", "C")):
+                atom = Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N")
+                residue.add(atom)
+            chain.add(residue)
+            model.add(chain)
+            structure.add(model)
+            io = MMCIFIO()
+            io.set_structure(structure)
+            io.save(str(path))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            for step in (0, 1):
+                frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
+            document, report = REPORT.build(root)
+            self.assertIsNotNone(report["ensemble_bundle"])
+            self.assertIn("ensemble.pdb", document)
+            bundle = root / report["ensemble_bundle"]
+            self.assertEqual(bundle.read_text(encoding="utf-8").count("MODEL"), 2)
 
 
 if __name__ == "__main__":
