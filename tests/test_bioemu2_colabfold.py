@@ -3,6 +3,7 @@ import json
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -68,6 +69,29 @@ class InputTests(unittest.TestCase):
             payload, _ = MODULE.build_fold_input(arguments(protein=str(fasta), ligand_ccd="", ligand_smiles=""))
         proteins = [entity["protein"] for entity in payload["sequences"]]
         self.assertEqual([item["sequence"] for item in proteins], ["ACDE", "FGHI"])
+
+    def test_fasta_headerless_file_is_a_bare_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fasta = Path(tmp) / "input.fa"
+            fasta.write_text("ACDE\nFGHI\n", encoding="utf-8")
+            payload, _ = MODULE.build_fold_input(arguments(protein=str(fasta), ligand_ccd="", ligand_smiles=""))
+        proteins = [entity["protein"] for entity in payload["sequences"]]
+        self.assertEqual([item["sequence"] for item in proteins], ["ACDEFGHI"])
+
+    def test_fasta_data_before_the_first_header_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fasta = Path(tmp) / "input.fa"
+            fasta.write_text("ACDE\n>one\nFGHI\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.InputError, "before the first '>' header"):
+                MODULE.build_fold_input(arguments(protein=str(fasta)))
+
+    def test_fasta_trailing_empty_record_is_rejected(self):
+        # A record dropped here used to shift every later chain id silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            fasta = Path(tmp) / "input.fa"
+            fasta.write_text(">one\nACDE\n>two\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.InputError, "empty FASTA record"):
+                MODULE.build_fold_input(arguments(protein=str(fasta)))
 
     def test_rejects_invalid_polymer(self):
         with self.assertRaisesRegex(MODULE.InputError, "unsupported"):
@@ -177,6 +201,55 @@ class GateConsistencyTests(unittest.TestCase):
             (private / "int8" / "bioemu2.int8.bin.zst").write_bytes(b"x" * 200_000_000)
             self.assertEqual(self.gate(private, "int8")[0], "0")
             self.assertEqual(self.gate(shared, "int8")[0], "1")
+
+
+class AcceleratorTests(unittest.TestCase):
+    """Attention selection is delegated to the pinned fork's own policy."""
+
+    def setUp(self):
+        self._saved = {name: sys.modules.get(name) for name in (
+            "alphafold3", "alphafold3.model", "alphafold3.model.components",
+            "alphafold3.model.components.platform",
+        )}
+
+    def tearDown(self):
+        for name, module in self._saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def install_platform(self, device: str, attention: str, flags: list[str]):
+        import types
+        platform = types.ModuleType("alphafold3.model.components.platform")
+        platform.detect_device = lambda: (device, 8.0 if device == "gpu" else None)
+        platform.attention_config = lambda device=None, cap=None: {
+            "attention": attention, "xla_flags": flags, "nojit": device == "cpu",
+        }
+        components = types.ModuleType("alphafold3.model.components")
+        components.platform = platform
+        model = types.ModuleType("alphafold3.model")
+        model.components = components
+        af3 = types.ModuleType("alphafold3")
+        af3.model = model
+        sys.modules.update({
+            "alphafold3": af3,
+            "alphafold3.model": model,
+            "alphafold3.model.components": components,
+            "alphafold3.model.components.platform": platform,
+        })
+
+    def test_delegates_to_the_fork_policy(self):
+        self.install_platform("gpu", "volta", ["--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"])
+        self.assertEqual(
+            MODULE.detect_accelerator(),
+            ("volta", ["--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"]),
+        )
+
+    def test_without_a_gpu_the_run_is_refused(self):
+        self.install_platform("cpu", "xla", [])
+        with self.assertRaisesRegex(RuntimeError, "NVIDIA GPU"):
+            MODULE.detect_accelerator()
 
 
 class PropagationTests(unittest.TestCase):

@@ -52,9 +52,15 @@ fi
 # Location for the shared cross-job lock taken by scripts/setup_runtime.sh. It
 # must sit somewhere ordinary users may create files: the shared weight root is
 # administrator owned and bind-mounted read-only into jobs.
-export BIOEMU2_LOCK_DIR="${BASE_WORK_DIR}"
 exec > >(tee -a "${LIVE_LOG}")
 exec 2>&1
+# Record the run directory as soon as it exists. after.sh runs on the OOD host
+# even when the job fails, and the completed-session view needs the real
+# directory rather than a guess from the session name -- a failed fold must
+# link its (possibly partial) output, not a dangling path. The value equals
+# what the success path used to write, so this replaces that late write.
+printf '%s\n' "${RUN_ID}" > "${OOD_SESSION_DIR}/run_dir.txt"
+ln -sfn "${OUT_DIR}" "${OOD_SESSION_DIR}/results"
 
 collect_debug_files() {
   local status=$?
@@ -284,6 +290,4 @@ apptainer exec --cleanenv \
   --bind "${OUT_DIR}:${OUT_DIR}" \
   "${BIOEMU2_IMAGE}" \
   python "${OOD_SESSION_DIR}/build_report.py" "${OUT_DIR}"
-printf '%s\n' "${RUN_ID}" > "${OOD_SESSION_DIR}/run_dir.txt"
-ln -sfn "${OUT_DIR}" "${OOD_SESSION_DIR}/results"
 echo "BioEmu2 completed successfully: ${OUT_DIR}/report.html"

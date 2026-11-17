@@ -21,10 +21,6 @@ BIOEMU2_PRECISIONS='int8 fp16 fp32'
 # so this only rejects truncation or an empty placeholder.
 BIOEMU2_MIN_WEIGHT_SIZE=${BIOEMU2_MIN_WEIGHT_SIZE:-100000000}
 
-# Where the cross-job setup lock lives. Must be user-writable, unlike the shared
-# weight root, so an ordinary user can never create files in that root.
-BIOEMU2_LOCK_DIR=${BIOEMU2_LOCK_DIR:-${TMPDIR:-/tmp}}
-
 # The published basename of the blob at a precision. Mirrors
 # alphafold3.model.model_registry.ModelSpec.weights_file_for: 'fp32' is the
 # original release and carries no infix, every other precision gains
@@ -144,12 +140,4 @@ bioemu2_gate_weights() {
   printf -v "${reason_var}" '%s' "${reason}"
   printf -v "${file_var}" '%s' "${resolved}"
   return "${status}"
-}
-
-# Shared advisory lock for weight setup; the caller must keep fd 8 open so the
-# lock spans the whole download. Prevents two concurrent fetches from leaving
-# two blobs in one directory. Usage: exec 8>...; bioemu2_lock_weights
-bioemu2_lock_weights() {
-  mkdir -p "${BIOEMU2_LOCK_DIR}"
-  flock 8
 }

@@ -43,12 +43,19 @@ def _clean_sequence(value: str) -> str:
 def _read_fasta(path: Path) -> list[str]:
     records: list[str] = []
     current: list[str] = []
+    pending: list[str] = []  # lines before the first header
     saw_header = False
     for raw in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw.strip()
         if not line:
             continue
         if line.startswith(">"):
+            if pending:
+                # Sequence data before the first header is garbled input, and
+                # silently merging it into the first record would fold junk
+                # into a chain. A file with no headers at all is the one
+                # legitimate shape for leading data: a bare sequence.
+                raise InputError(f"{path} has sequence data before the first '>' header")
             if saw_header:
                 if not current:
                     raise InputError(f"empty FASTA record in {path}")
@@ -59,8 +66,14 @@ def _read_fasta(path: Path) -> list[str]:
         if saw_header:
             current.append(line)
         else:
-            current.append(line)
-    if current:
+            pending.append(line)
+    if pending:
+        records.append(_clean_sequence("".join(pending)))
+    elif saw_header and not current:
+        # A file ending right after a header used to drop that record
+        # silently, shifting every later chain id.
+        raise InputError(f"empty FASTA record in {path}")
+    elif current:
         records.append(_clean_sequence("".join(current)))
     if not records:
         raise InputError(f"no sequence records found in {path}")
@@ -227,26 +240,28 @@ def build_fold_input(args: argparse.Namespace) -> tuple[dict, str]:
 
 
 def detect_accelerator() -> tuple[str, list[str]]:
-    """Return notebook-equivalent attention implementation and XLA additions."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        caps = [float(value.strip()) for value in result.stdout.splitlines() if value.strip()]
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        caps = []
-    if not caps:
+    """Notebook-equivalent attention selection, delegated to the pinned fork.
+
+    The notebook picks the attention implementation and its XLA flags via
+    alphafold3.model.components.platform.attention_config, and that policy is
+    subtler than a compute-capability threshold: pre-Ampere cards take the
+    legacy Volta kernels when they are installed, A100 (exactly 8.0) runs
+    Triton, but 8.6/8.9 consumer cards must NOT (tokamax refuses to launch
+    there and the fork falls back to Pallas). This wrapper used to
+    reimplement that table and had already drifted from it. The wrapper runs
+    inside the pinned container, so call the fork's own selector instead of
+    keeping a second copy of the policy.
+    """
+    from alphafold3.model.components import platform
+
+    device, _ = platform.detect_device()
+    if device != "gpu":
         raise RuntimeError("BioEmu2 requires an NVIDIA GPU, but none was detected")
-    cap = min(caps)
-    if cap < 8.0:
-        return "xla", ["--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"]
-    if 8.0 < cap < 9.0:
-        return "xla", ["--xla_gpu_enable_triton_gemm=false"]
-    return "triton", ["--xla_gpu_enable_triton_gemm=false"]
+    config = platform.attention_config(device=device)
+    if config.get("nojit"):
+        # Only the CPU row sets nojit; a GPU should never land here.
+        raise RuntimeError("no usable GPU accelerator was detected")
+    return config["attention"], list(config["xla_flags"])
 
 
 def parser() -> argparse.ArgumentParser:

@@ -10,16 +10,19 @@ RESULTS_URL_BASE=${RESULTS_URL_BASE:-/pun/sys/dashboard/files/fs}
 if [[ -s run_dir.txt ]]; then
   RUN_DIR=$(<run_dir.txt)
 else
-  # Open OnDemand sources this file on the OOD host, where PBS_JOBID is not
-  # defined, so the job number has to come from the session directory name
-  # (the basic template stage-out names it after the PBS job). Fall back to
-  # the job name and finally to a bare sanitized run name.
+  # run_dir.txt is written by the job as soon as its output directory exists,
+  # so reaching here means it died before that. The live log then still names
+  # the directory the run was about to use -- prefer it over guessing.
   SAFE_NAME=$(printf '%s' '<%= context.run_name.to_s.gsub("'", "") %>' | sed 's/[^A-Za-z0-9_-]/_/g')
-  JOB_TAG="${PBS_JOBID:-}"
-  JOB_TAG="${JOB_TAG%%.*}"
-  [[ -n "${JOB_TAG}" ]] || JOB_TAG=$(basename "$(pwd -P)" | sed -n 's/.*_\([0-9][0-9]*\)$/\1/p')
-  [[ -n "${JOB_TAG}" ]] || JOB_TAG=$(basename "$(pwd -P)")
-  RUN_DIR="${SAFE_NAME}_${JOB_TAG}"
+  LOGGED_DIR=$(sed -n 's/^BioEmu2 output: //p' "$(pwd -P)/live_log.log" 2>/dev/null | tail -1)
+  if [[ -n "${LOGGED_DIR}" ]]; then
+    RUN_DIR=$(basename "${LOGGED_DIR}")
+  else
+    # Effectively unreachable: only a crash before the job's first echo lands
+    # here. The session directory is named after a UUID, which cannot
+    # reconstruct the job number, so this names the run without one.
+    RUN_DIR="${SAFE_NAME}_$(basename "$(pwd -P)")"
+  fi
 fi
 OUT_DIR="${BASE_OUT_DIR}/${RUN_DIR}"
 ln -sfn "${OUT_DIR}" results 2>/dev/null || true

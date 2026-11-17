@@ -44,10 +44,10 @@ fi
 # One lock for the whole root, held across the download: a second administrator
 # fetching the same precision concurrently would otherwise leave two
 # *.bin.zst files in one directory, which the upstream loader resolves by
-# picking any blob it finds. The lock lives in the user-writable run state so an
-# unprivileged syntax check of this file cannot try to create files inside the
-# read-only shared weight root.
-exec 8>"${BIOEMU2_LOCK_DIR}/.bioemu2-weights-setup.lock"
+# picking any blob it finds. The lock lives here in the administrator-owned
+# weight root rather than /tmp, where a predictable name would be a symlink
+# target for a script that runs with elevated rights.
+exec 8>"${WEIGHTS_ROOT}/.setup.lock"
 flock 8
 apptainer exec --cleanenv --bind "${WEIGHTS_ROOT}:${WEIGHTS_ROOT}" "${IMAGE}" \
   python - "${TARGET_DIR}" "${PRECISION}" <<'PY'
