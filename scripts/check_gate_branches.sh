@@ -4,7 +4,7 @@
 # OOD validator only syntax-checks. Run: bash scripts/check_gate_branches.sh
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); export T; trap 'rm -rf "$T"' EXIT
 
 python3 - "$ROOT" "$T" <<'PY' || exit 1
 import pathlib, re, sys
@@ -35,9 +35,11 @@ tail = next(i for i, l in enumerate(lines[apx:], apx) if l.startswith("apptainer
 head = lines[:wdir]
 assigns = [l for l in head if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", l)]
 sourcelib = [l for l in head if "bioemu2_weights_lib.sh" in l and l.strip().startswith(".")]
-out = ["#!/bin/bash", "set -eEuo pipefail"]
-out += [l for l in assigns if not l.startswith(("OOD_SESSION_DIR", "ENV_FILE", "APP_ROOT"))]
+out = ["#!/bin/bash\n", "set -eEuo pipefail\n"]
+# Environment overrides FIRST: some staged assignment lines reference
+# OOD_SESSION_DIR, which is unbound under set -u until it is defined.
 out += [f'OOD_SESSION_DIR="$T"\n', 'ENV_FILE=.env\n', f'APP_ROOT="{root}"\n']
+out += [l for l in assigns if not l.startswith(("OOD_SESSION_DIR", "ENV_FILE", "APP_ROOT"))]
 out += sourcelib + lines[start:metrics] + lines[apx:tail]
 out += ['echo "GATE_RESOLVED=${WEIGHTS_GATE_FILE}"\n',
         'echo "BIND=${WEIGHTS_BIND}${WEIGHTS_BIND_SUFFIX}"\n',

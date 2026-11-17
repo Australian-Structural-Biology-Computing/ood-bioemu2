@@ -25,15 +25,22 @@ mkdir -p "${TARGET_DIR}"
 # blob that arrived truncated or under the wrong name is still caught.
 gate_and_report() {
   local reason='' file=''
-  bioemu2_gate_weights "${WEIGHTS_ROOT}" "${PRECISION}" reason file
-  # Status on its own line: a bare word `case` right after a command is parsed
-  # as a new pattern-clause header, not as `case $? in`, which swallows this
-  # whole block and still passes `bash -n`.
-  local status=$?
+  # Errexit-safe capture: the gate returns non-zero by design (see the
+  # matching comment in template/script.sh.erb).
+  local status=0
+  bioemu2_gate_weights "${WEIGHTS_ROOT}" "${PRECISION}" reason file || status=$?
   case "${status}" in
     0) echo "BioEmu2 ${PRECISION} weights ready: ${file}"; return 0;;
     1) return 1;;
-    *) echo "ERROR: ${reason}" >&2; return 1;;
+    *)
+      # Unusable (foreign name, truncated, or duplicated blob): re-running the
+      # download cannot repair the directory, because the upstream loader
+      # accepts any blob it finds and leaves existing ones alone. Say so
+      # instead of implying a re-run will fix it.
+      echo "ERROR: ${reason}" >&2
+      echo "Remediation: an administrator must remove the offending blob from ${WEIGHTS_ROOT}/${PRECISION} by hand; re-running this script cannot repair it." >&2
+      exit 1
+      ;;
   esac
 }
 if gate_and_report; then
@@ -69,5 +76,8 @@ chgrp -R "${GROUP}" "${WEIGHTS_ROOT}"
 find "${WEIGHTS_ROOT}" -type d -exec chmod 2775 {} +
 find "${WEIGHTS_ROOT}" -type f -exec chmod 664 {} +
 
-gate_and_report
+if ! gate_and_report; then
+  echo "ERROR: the weight directory still does not pass the gate after the download; see the message above." >&2
+  exit 1
+fi
 echo "Runtime setup complete. Keep BIOEMU2_ALLOW_WEIGHT_DOWNLOAD=false in production."

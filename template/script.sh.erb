@@ -145,6 +145,16 @@ if [[ -n "${PROPAGATE_FROM_INPUT}" ]]; then
   PROPAGATE_FROM_INPUT="${X0_INPUT}"
   echo "Copied the propagation start structure into the run work directory."
 fi
+# The step count and lag only travel with a start structure. A cleared form
+# field otherwise reaches argparse as an empty string and fails the int/float
+# conversion -- killing jobs that never asked to propagate.
+PROPAGATION_ARGS=()
+if [[ -n "${PROPAGATE_FROM_INPUT}" ]]; then
+  PROPAGATION_ARGS=(
+    --propagation-steps <%= Shellwords.escape(context.propagation_steps.to_s) %>
+    --lag-ns <%= Shellwords.escape(context.lag_ns.to_s) %>
+  )
+fi
 # alphafold3.model.weights.ensure_weights accepts ANY *.bin.zst already present
 # in --model_dir and never re-checks the requested precision, so per-precision
 # directories only isolate the representations if the gate demands the exact
@@ -154,12 +164,17 @@ fi
 WEIGHTS_DIR="$(bioemu2_weights_dir "${BIOEMU2_WEIGHTS_ROOT}" "${WEIGHTS_PRECISION}")"
 WEIGHTS_GATE_REASON=''
 WEIGHTS_GATE_FILE=''
-bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE
+# Errexit-safe capture: the gate DELIBERATELY returns non-zero for missing or
+# unusable weights, and under `set -e` a bare failing command exits the script
+# before its status can be read -- silently, with none of the case's
+# diagnostics (the err-trap replay hid this for a while because the harness
+# shebang accidentally swallowed its own `set -e`).
+WEIGHTS_GATE_STATUS=0
+bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE || WEIGHTS_GATE_STATUS=$?
 # Capture the status on its own line. Immediately after `bioemu2_gate_weights` a
 # word `case` would be parsed as a NEW pattern-clause header rather than the
 # `in` of `case $? in`, which silently swallows the whole gate block and still
 # passes `bash -n`.
-WEIGHTS_GATE_STATUS=$?
 if [[ "${WEIGHTS_GATE_STATUS}" == 1 && "${BIOEMU2_ALLOW_WEIGHT_DOWNLOAD}" == "true" ]]; then
   # Before spending an allocation on a multi-hundred-megabyte download, check
   # whether the administrator has already staged exactly what was asked for.
@@ -185,8 +200,8 @@ case "${WEIGHTS_GATE_STATUS}" in
       # only the private directory has to be usable. Gate it before committing
       # the allocation to a multi-hundred-megabyte download that would otherwise
       # fail at weight-load time, deep into the run.
-      bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE
-      WEIGHTS_DOWNLOAD_STATUS=$?
+      WEIGHTS_DOWNLOAD_STATUS=0
+      bioemu2_gate_weights "${WEIGHTS_GATE_ROOT}" "${WEIGHTS_PRECISION}" WEIGHTS_GATE_REASON WEIGHTS_GATE_FILE || WEIGHTS_DOWNLOAD_STATUS=$?
       if [[ "${WEIGHTS_DOWNLOAD_STATUS}" != 1 ]]; then
         echo "ERROR: ${WEIGHTS_GATE_REASON}" >&2
         echo "Refusing to download into ${WEIGHTS_GATE_ROOT}." >&2
@@ -205,9 +220,11 @@ case "${WEIGHTS_GATE_STATUS}" in
     ;;
   *)
     # Unusable shared state: an unsupported representation, or a stray blob the
-    # loader would silently pick up. A per-job download cannot fix either.
+    # loader would silently pick up. A per-job download cannot fix either, and
+    # neither can re-running setup: upstream leaves existing blobs alone, so
+    # the directory must be repaired by hand.
     echo "ERROR: ${WEIGHTS_GATE_REASON}" >&2
-    echo "Refusing to run: the runner would load any *.bin.zst it finds in ${WEIGHTS_DIR}. Ask an administrator to re-run scripts/setup_runtime.sh ${WEIGHTS_PRECISION}." >&2
+    echo "Refusing to run: the runner would load any *.bin.zst it finds in ${WEIGHTS_DIR}. An administrator must remove the offending blob from ${WEIGHTS_DIR}; re-running scripts/setup_runtime.sh alone cannot repair it." >&2
     exit 1
     ;;
 esac
@@ -276,8 +293,7 @@ apptainer exec --nv --cleanenv \
     --sampler <%= Shellwords.escape(context.sampler.to_s) %> \
     --physicality <%= Shellwords.escape(context.physicality.to_s) %> \
     --propagate-from "${PROPAGATE_FROM_INPUT}" \
-    --propagation-steps <%= Shellwords.escape(context.propagation_steps.to_s) %> \
-    --lag-ns <%= Shellwords.escape(context.lag_ns.to_s) %> \
+    "${PROPAGATION_ARGS[@]}" \
     --weights-precision "${WEIGHTS_PRECISION}" \
     "${ALLOW_DOWNLOAD[@]}"
 

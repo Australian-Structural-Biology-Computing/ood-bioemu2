@@ -126,7 +126,12 @@ bioemu2_resolve_weights() {
 bioemu2_gate_weights() {
   local root=${1:-} precision=${2:-} reason_var=${3:-} file_var=${4:-}
   [[ -n "${reason_var}" && -n "${file_var}" ]] || return 2
-  local dir wanted filename resolved='' reason=''
+  # The result locals deliberately avoid the names callers tend to choose
+  # ("reason", "file"): bash scopes dynamically, so a caller local with the
+  # same name would be shadowed here and printf -v would write THIS frame's
+  # variable, which vanishes on return -- the caller would read an empty
+  # string (setup_runtime.sh did exactly that).
+  local dir wanted filename resolved_path='' diagnosis=''
   if ! wanted=$(bioemu2_expected_weights "${root}" "${precision}"); then
     printf -v "${reason_var}" 'unsupported precision %s (want one of: %s)' \
       "${precision:-<empty>}" "${BIOEMU2_PRECISIONS// /, }"
@@ -135,9 +140,9 @@ bioemu2_gate_weights() {
   fi
   dir=$(bioemu2_weights_dir "${root}" "${precision}")
   filename=${wanted##*/}
-  bioemu2_resolve_weights "${dir}" "${filename}" resolved reason
+  bioemu2_resolve_weights "${dir}" "${filename}" resolved_path diagnosis
   local status=$?
-  printf -v "${reason_var}" '%s' "${reason}"
-  printf -v "${file_var}" '%s' "${resolved}"
+  printf -v "${reason_var}" '%s' "${diagnosis}"
+  printf -v "${file_var}" '%s' "${resolved_path}"
   return "${status}"
 }

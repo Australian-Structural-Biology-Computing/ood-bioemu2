@@ -210,7 +210,7 @@ attributes:
     widget: "text_field"
     label: "Lag time per step (ns)"
     value: "1"
-    pattern: '^[0-9]+(\.[0-9]+)?$'
+    pattern: '^(?!0+(\.0+)?$)[0-9]+(\.[0-9]+)?$'
     help: "Only used when a starting structure is given. Simulated time between trajectory frames, in nanoseconds; must be positive."
 
   weights_precision:
