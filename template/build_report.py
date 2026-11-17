@@ -270,7 +270,8 @@ def viewer_js_source() -> Path | None:
     return None
 
 
-def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) -> tuple[str, bool]:
+def interactive_viewer_block(root: Path, bundle: Path | None,
+                             frame_meta: list[dict]) -> tuple[str, bool]:
     """The 3Dmol.js card for the report: the vendored viewer is INLINED into
     the HTML (not referenced as a sibling file), the bundled PDB is inlined
     as JSON, and a slider flips through the frames. Inlining makes the single
@@ -278,6 +279,7 @@ def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) 
     breaks the moment a user saves the file locally, which is exactly how the
     completed-session report gets read. Best effort -- any problem returns an
     empty fragment and the static preview remains."""
+    frame_count = len(frame_meta)
     if bundle is None or frame_count < 1:
         return "", False
     source = viewer_js_source()
@@ -304,6 +306,7 @@ def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) 
         '<div id="ensemble-viewer" style="width:100%;height:440px;position:relative"></div>'
         f'<input id="frame-slider" type="range" min="0" max="{frame_count - 1}" value="0" style="width:100%">'
         '<div id="frame-label" class="muted"></div>'
+        "<script>var frameMeta = " + json.dumps(frame_meta) + ";</script>"
         "<script>var ensemblePdbData = " + json.dumps(data) + ";</script>"
         "<script>"
         "(function(){"
@@ -319,7 +322,11 @@ def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) 
         "viewer.zoomTo();viewer.render();"
         'var slider=document.getElementById("frame-slider");'
         'var label=document.getElementById("frame-label");'
-        'function show(i){viewer.setFrame(i);viewer.render();label.textContent="frame "+(i+1)+" of "+slider.max;}'
+        'function show(i){viewer.setFrame(i);viewer.render();'
+        'var m=frameMeta[i]||{};var t=(m.time_ns!==undefined)?" · t = "+m.time_ns+" ns":"";'
+        'label.textContent="frame "+(i+1)+" of "+slider.max'
+        '+(m.seed!==undefined?" — seed "+m.seed:"")'
+        '+(m.step!==undefined?" · step "+m.step:"")+t;}'
         'slider.addEventListener("input",function(){show(parseInt(slider.value,10))});'
         'var dl=document.getElementById("ensemble-download");'
         'if(dl){dl.addEventListener("click",function(){'
@@ -376,9 +383,6 @@ def build(root: Path) -> tuple[str, dict]:
                 "frames_compared": int(rmsd.shape[0]),
             }
         preview = write_ensemble_preview(root, str(job_name), traces, rmsd)
-    interactive_block, interactive_js = interactive_viewer_block(
-        root, bundle, bundle_models if bundle else 0)
-
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [(path, load_json(path)) for path in physicality_files]
     physicality_by_frame = frame_physicality(physicality)
@@ -407,34 +411,71 @@ def build(root: Path) -> tuple[str, dict]:
     no_confidence = not any(meaningful(value) for value in metrics.values())
 
     lag_ns = metadata.get("lag_ns") or 0
-    frame_rows = []
-    frames_listed = 0
+    # Frame manifest: one entry per trajectory frame, in walking order. Seeds
+    # are INDEPENDENT trajectories -- for a propagated run the step counter
+    # and simulated time restart at every seed, and the presentation must
+    # never imply one continuous kinetic path across a seed boundary.
+    frame_meta: list[dict] = []
     for path in cifs:
-        label = path.relative_to(root).as_posix()
-        verdict = ""
-        match = SAMPLE_RE.search(label)
+        match = SAMPLE_RE.search(str(path))
         if not match:
             # The job-level CIF duplicates one of the per-frame files; listing
             # it as a frame would miscount the trajectory.
             continue
-        frames_listed += 1
+        seed, sample = int(match.group(1)), int(match.group(2))
+        entry = {
+            "path": path.relative_to(root).as_posix(),
+            "seed": seed,
+            "sample": sample,
+        }
         if propagating:
             # sample-M is the M+1-th chained propagation step: the starting
             # structure x0 is the conditioning input, not an output sample, so
             # sample-0 already sits one lag after it.
-            step = int(match.group(2)) + 1
-            label += f" — step {step}, t = {step * float(lag_ns):g} ns"
-        entry = physicality_by_frame.get((int(match.group(1)), int(match.group(2))))
-        if entry:
-            status = str(entry.get("status", "unknown"))
-            verdict = f" · physicality: {status}"
-            if status != "passed" and entry.get("reason"):
-                verdict += f" ({entry.get('reason')})"
-        frame_rows.append(
-            f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(label)}</a>'
-            f'{html.escape(verdict)}</li>'
+            entry["step"] = sample + 1
+            entry["time_ns"] = round((sample + 1) * float(lag_ns), 6)
+        physicality_entry = physicality_by_frame.get((seed, sample))
+        if physicality_entry:
+            entry["physicality"] = str(physicality_entry.get("status", "unknown"))
+            if entry["physicality"] != "passed" and physicality_entry.get("reason"):
+                entry["physicality_reason"] = str(physicality_entry["reason"])
+        frame_meta.append(entry)
+
+    def frame_label(meta: dict) -> str:
+        label = meta["path"]
+        if propagating:
+            label += f" — step {meta['step']}, t = {meta['time_ns']:g} ns"
+        if "physicality" in meta:
+            verdict = f" · physicality: {meta['physicality']}"
+            if meta["physicality"] != "passed" and "physicality_reason" in meta:
+                verdict += f" ({meta['physicality_reason']})"
+            label += verdict
+        return label
+
+    seeds = sorted({meta["seed"] for meta in frame_meta})
+    frame_rows = []
+    if propagating and len(seeds) > 1:
+        for seed in seeds:
+            group = [meta for meta in frame_meta if meta["seed"] == seed]
+            total_time = group[-1]["time_ns"] if propagating and group else 0
+            frame_rows.append(
+                f'<li class="seed-group">Seed {seed} — independent trajectory '
+                f'({len(group)} frames, 0–{total_time:g} ns)</li>'
+            )
+            frame_rows.extend(
+                f'<li class="seed-frame"><a href="{html.escape(relative_link(root / meta["path"], root), quote=True)}">'
+                f'{html.escape(frame_label(meta))}</a></li>'
+                for meta in group
+            )
+    else:
+        frame_rows.extend(
+            f'<li><a href="{html.escape(relative_link(root / meta["path"], root), quote=True)}">'
+            f'{html.escape(frame_label(meta))}</a></li>'
+            for meta in frame_meta
         )
     file_rows = "".join(frame_rows) or "<li>No CIF files found.</li>"
+    interactive_block, interactive_js = interactive_viewer_block(
+        root, bundle, frame_meta)
 
     heading = {
         "trajectory": "Trajectory frames",
@@ -546,7 +587,7 @@ def build(root: Path) -> tuple[str, dict]:
     }
     document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>BioEmu2 results</title>
-<style>body{{margin:0;background:#f4f7f9;color:#172033;font:16px/1.5 system-ui}}main{{max-width:960px;margin:3rem auto;padding:0 1rem}}.card{{background:white;border:1px solid #dbe4ee;border-radius:16px;padding:1.5rem;box-shadow:0 8px 30px #0f172a12;margin:1rem 0}}h1,h2{{line-height:1.15}}.muted{{color:#64748b}}.note{{padding:1rem;border-left:4px solid #d97706;background:#fffbeb}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;text-align:left;border-bottom:1px solid #e2e8f0}}.scroll{{overflow:auto}}code{{background:#eef2f7;padding:.15rem .35rem;border-radius:4px}}a{{color:#0369a1}}</style>
+<style>body{{margin:0;background:#f4f7f9;color:#172033;font:16px/1.5 system-ui}}li.seed-group{{list-style:none;font-weight:600;margin-top:.6rem}}li.seed-frame{{list-style:none;margin-left:1.2rem}}main{{max-width:960px;margin:3rem auto;padding:0 1rem}}.card{{background:white;border:1px solid #dbe4ee;border-radius:16px;padding:1.5rem;box-shadow:0 8px 30px #0f172a12;margin:1rem 0}}h1,h2{{line-height:1.15}}.muted{{color:#64748b}}.note{{padding:1rem;border-left:4px solid #d97706;background:#fffbeb}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;text-align:left;border-bottom:1px solid #e2e8f0}}.scroll{{overflow:auto}}code{{background:#eef2f7;padding:.15rem .35rem;border-radius:4px}}a{{color:#0369a1}}</style>
 </head><body><main><p class="muted">ColabFold2 preview · BioEmu2</p><h1>{html.escape(str(job_name))}</h1>
 <div class="card"><h2>Run</h2><table>
 <tr><th>Task</th><td>{html.escape(display(metadata.get('mode')))}</td></tr>{propagation_row}

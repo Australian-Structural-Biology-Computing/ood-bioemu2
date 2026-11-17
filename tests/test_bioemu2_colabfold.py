@@ -418,6 +418,30 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(report["ensemble_bundle_frames"], 2)
             self.assertNotIn("first 2 of", document)
 
+    def test_multi_seed_propagation_presents_independent_trajectories(self):
+        # Two seeds are two independent trajectories: the frame list groups
+        # them with per-seed headings, and the viewer manifest carries
+        # seed/step/time so the slider label never implies time continues
+        # across a seed boundary.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {
+                "job_name": "job", "mode": "equilibrium",
+                "propagation_steps": 2, "lag_ns": 1.0, "propagate_from": "/x/start.cif",
+            })
+            job = root / "job"
+            for seed in (1, 2):
+                for sample in (0, 1):
+                    write_frame_cif(job / f"job_seed-{seed}_sample-{sample}_model.cif")
+            document, report = REPORT.build(root)
+        self.assertIn("Seed 1 — independent trajectory (2 frames, 0–2 ns)", document)
+        self.assertIn("Seed 2 — independent trajectory (2 frames, 0–2 ns)", document)
+        self.assertIn("time restarts at every seed boundary", document)
+        manifest = json.loads(re.search(
+            r"<script>var frameMeta = (\[.*?\]);</script>", document).group(1))
+        self.assertEqual([(f["seed"], f["step"], f["time_ns"]) for f in manifest],
+                         [(1, 1, 1.0), (1, 2, 2.0), (2, 1, 1.0), (2, 2, 2.0)])
+        self.assertIn("var frameMeta", document)
+
     def test_physicality_verdicts_surface_per_frame(self):
         # The confidence columns are all NaN in this port; the physicality
         # screen is the quality signal the report must surface instead.
