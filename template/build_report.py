@@ -311,13 +311,21 @@ def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) 
         'if(typeof $3Dmol==="undefined"){holder.innerHTML="3Dmol.js failed to load.";return;}'
         "try{"
         'var viewer=$3Dmol.createViewer(holder,{backgroundColor:"white"});'
+        "/* 3Dmol v2: addModelsAsFrames loads a multi-model PDB as frames;"
+        "   frames are selected with setFrame (setModel switches between"
+        "   separately added models and does not apply here). */"
         'viewer.addModelsAsFrames(ensemblePdbData,"pdb");'
         'viewer.setStyle({},{cartoon:{color:"spectrum"}});'
         "viewer.zoomTo();viewer.render();"
         'var slider=document.getElementById("frame-slider");'
         'var label=document.getElementById("frame-label");'
-        'function show(i){viewer.setModel(i);label.textContent="frame "+i+" of "+slider.max;}'
+        'function show(i){viewer.setFrame(i);viewer.render();label.textContent="frame "+(i+1)+" of "+slider.max;}'
         'slider.addEventListener("input",function(){show(parseInt(slider.value,10))});'
+        'var dl=document.getElementById("ensemble-download");'
+        'if(dl){dl.addEventListener("click",function(){'
+        'var blob=new Blob([ensemblePdbData],{type:"chemical/x-pdb"});'
+        'var a=document.createElement("a");a.href=URL.createObjectURL(blob);'
+        'a.download="ensemble.pdb";a.click();URL.revokeObjectURL(a.href);});}'
         "show(0);"
         "}catch(error){holder.innerHTML=" + json.dumps("Interactive view failed: ") + "+error;}"
         "})();"
@@ -374,8 +382,13 @@ def build(root: Path) -> tuple[str, dict]:
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [(path, load_json(path)) for path in physicality_files]
     physicality_by_frame = frame_physicality(physicality)
-    physicality_passed = sum(1 for entry in physicality_by_frame.values() if entry.get("status") == "passed")
-    physicality_failed = len(physicality_by_frame) - physicality_passed
+    physicality_counts: dict[str, int] = {}
+    for entry in physicality_by_frame.values():
+        status = str(entry.get("status", "unknown"))
+        physicality_counts[status] = physicality_counts.get(status, 0) + 1
+    physicality_passed = physicality_counts.get("passed", 0)
+    physicality_failed = physicality_counts.get("failed", 0)
+    physicality_unknown = len(physicality_by_frame) - physicality_passed - physicality_failed
     ranking_files = sorted(job_dir.rglob("*_ranking_scores.csv")) if job_dir.is_dir() else []
     ranking_rows: list[dict] = []
     if ranking_files:
@@ -395,20 +408,28 @@ def build(root: Path) -> tuple[str, dict]:
 
     lag_ns = metadata.get("lag_ns") or 0
     frame_rows = []
+    frames_listed = 0
     for path in cifs:
         label = path.relative_to(root).as_posix()
         verdict = ""
         match = SAMPLE_RE.search(label)
-        if match:
-            if propagating:
-                step = int(match.group(2))
-                label += f" — step {step}, t = {step * float(lag_ns):g} ns"
-            entry = physicality_by_frame.get((int(match.group(1)), int(match.group(2))))
-            if entry:
-                status = str(entry.get("status", "unknown"))
-                verdict = f" · physicality: {status}"
-                if status != "passed" and entry.get("reason"):
-                    verdict += f" ({entry.get('reason')})"
+        if not match:
+            # The job-level CIF duplicates one of the per-frame files; listing
+            # it as a frame would miscount the trajectory.
+            continue
+        frames_listed += 1
+        if propagating:
+            # sample-M is the M+1-th chained propagation step: the starting
+            # structure x0 is the conditioning input, not an output sample, so
+            # sample-0 already sits one lag after it.
+            step = int(match.group(2)) + 1
+            label += f" — step {step}, t = {step * float(lag_ns):g} ns"
+        entry = physicality_by_frame.get((int(match.group(1)), int(match.group(2))))
+        if entry:
+            status = str(entry.get("status", "unknown"))
+            verdict = f" · physicality: {status}"
+            if status != "passed" and entry.get("reason"):
+                verdict += f" ({entry.get('reason')})"
         frame_rows.append(
             f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(label)}</a>'
             f'{html.escape(verdict)}</li>'
@@ -420,7 +441,7 @@ def build(root: Path) -> tuple[str, dict]:
         "ensemble": "Ensemble samples",
     }.get(kind, "Structures")
     framing_note = {
-        "trajectory": "Frames are ordered in time, one per propagation step; this is a sampled trajectory, not a physically integrated dynamics run.",
+        "trajectory": "Frames are ordered in time, one per propagation step; this is a sampled trajectory, not a physically integrated dynamics run. Each seed is an independent trajectory -- the slider walks through them in turn, so time restarts at every seed boundary.",
         "ensemble": "Independent samples of the equilibrium ensemble. They are equiprobable draws, not a time series, and are not ranked.",
     }.get(kind)
 
@@ -451,7 +472,9 @@ def build(root: Path) -> tuple[str, dict]:
     physicality_note = (
         (f"{physicality_passed} of {len(physicality_by_frame)} frames passed the "
          f"{html.escape(str(metadata.get('physicality') or 'high_quality'))} physicality screen"
-         + (f"; {physicality_failed} failed but remain in the output." if physicality_failed else "."))
+         + (f"; {physicality_failed} failed but remain in the output." if physicality_failed else "")
+         + (f"; {physicality_unknown} could not be assessed." if physicality_unknown else ""))
+        + " Passing the screen checks structural sanity only -- it is not evidence of biological correctness."
         if physicality_by_frame else
         "No separate physicality JSON was found; inspect the job log before using these structures."
     )
@@ -516,6 +539,7 @@ def build(root: Path) -> tuple[str, dict]:
         "physicality_summary": {
             "passed": physicality_passed,
             "failed": physicality_failed,
+            "unknown": physicality_unknown,
             "frames": len(physicality_by_frame),
         },
         "ranking": ranking_rows,

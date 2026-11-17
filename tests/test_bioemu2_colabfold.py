@@ -440,7 +440,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn("physicality: passed", document)
         self.assertIn("physicality: failed (atom clash)", document)
         self.assertIn("1 of 2 frames passed the high_quality physicality screen", document)
-        self.assertEqual(report["physicality_summary"], {"passed": 1, "failed": 1, "frames": 2})
+        self.assertEqual(report["physicality_summary"],
+                             {"passed": 1, "failed": 1, "unknown": 0, "frames": 2})
 
     def test_interactive_viewer_uses_the_vendored_script(self):
         # Once vendored into template/, build_report.py finds 3Dmol.min.js next
@@ -530,6 +531,8 @@ class ReportTests(unittest.TestCase):
             document, report = REPORT.build(root)
         self.assertIn("<h2>Trajectory frames</h2>", document)
         self.assertIn("step 2, t = 4 ns", document)
+        self.assertIn("step 1, t = 2 ns", document)
+        self.assertNotIn("t = 0 ns", document)  # sample-0 is one lag after the start
         self.assertEqual(report["kind"], "trajectory")
 
     def test_frames_sort_numerically_past_sample_nine(self):
