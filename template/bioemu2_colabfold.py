@@ -250,14 +250,18 @@ def detect_accelerator() -> tuple[str, list[str]]:
     there and the fork falls back to Pallas). This wrapper used to
     reimplement that table and had already drifted from it. The wrapper runs
     inside the pinned container, so call the fork's own selector instead of
-    keeping a second copy of the policy.
+    keeping a second copy of the policy. It is called with no arguments so
+    the fork detects the device AND its compute capability itself: passing
+    the device without the cap lands on a different row (cuDNN instead of
+    Triton on an H200 -- three correct-but-slower GPU runs before this was
+    noticed).
     """
     from alphafold3.model.components import platform
 
     device, _ = platform.detect_device()
     if device != "gpu":
         raise RuntimeError("BioEmu2 requires an NVIDIA GPU, but none was detected")
-    config = platform.attention_config(device=device)
+    config = platform.attention_config()
     if config.get("nojit"):
         # Only the CPU row sets nojit; a GPU should never land here.
         raise RuntimeError("no usable GPU accelerator was detected")
