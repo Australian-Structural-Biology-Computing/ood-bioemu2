@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from argparse import Namespace
 from pathlib import Path
 
@@ -309,6 +310,75 @@ class ReportTests(unittest.TestCase):
         )
         (root / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
         return root
+
+    def test_nan_summary_does_not_fake_confidence(self):
+        # json round-trips NaN happily; one NaN sample must not suppress the
+        # "no confidence head" warning or set confidence_available.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            (job / "job_summary_confidences.json").write_text(
+                json.dumps({"mean_plddt": float("nan"), "ptm": float("nan"),
+                            "iptm": float("nan"), "ranking_score": float("nan")}),
+                encoding="utf-8",
+            )
+            (job / "sample.cif").write_text("data_test\n", encoding="utf-8")
+            document, report = REPORT.build(root)
+        self.assertIn("Confidence head unavailable", document)
+        self.assertFalse(report["confidence_available"])
+        self.assertIsNone(report["summary_metrics"]["mean_plddt"])
+
+    def test_ensemble_mode_shows_ranking_when_scores_are_real(self):
+        # csv.DictReader yields strings; a finite score must still be detected.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            (job / "job_seed-1_sample-0_model.cif").write_text("data_test\n", encoding="utf-8")
+            (job / "job_ranking_scores.csv").write_text(
+                "seed,sample,ranking_score\n1,0,0.75\n", encoding="utf-8"
+            )
+            document, _ = REPORT.build(root)
+        self.assertIn("<h2>Ranking</h2>", document)
+
+    def test_ensemble_bundle_is_capped(self):
+        try:
+            from Bio.PDB import MMCIFIO, PDBParser
+            from Bio.PDB.Structure import Structure
+            from Bio.PDB.Model import Model
+            from Bio.PDB.Chain import Chain
+            from Bio.PDB.Residue import Residue
+            from Bio.PDB.Atom import Atom
+        except ImportError:
+            self.skipTest("biopython unavailable on this host")
+
+        def frame_cif(path: Path) -> None:
+            structure = Structure("frame")
+            model = Model(0)
+            chain = Chain("A")
+            residue = Residue((" ", 1, " "), "ALA", " ")
+            for index, name in enumerate(("N", "CA", "C")):
+                residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
+            chain.add(residue)
+            model.add(chain)
+            structure.add(model)
+            io = MMCIFIO()
+            io.set_structure(structure)
+            io.save(str(path))
+
+        total = REPORT.MAX_BUNDLE_MODELS + 5
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            for step in range(total):
+                frame_cif(job / f"job_seed-1_sample-{step}_model.cif")
+            document, report = REPORT.build(root)
+            self.assertEqual(report["ensemble_bundle_frames"], REPORT.MAX_BUNDLE_MODELS)
+            self.assertTrue(report["ensemble_bundle_truncated"])
+            self.assertIn(f"first {REPORT.MAX_BUNDLE_MODELS} of {total}", document)
+            parser = PDBParser(QUIET=True)
+            warnings.filterwarnings("ignore")
+            structure = parser.get_structure("b", str(root / report["ensemble_bundle"]))
+            self.assertEqual(len(list(structure)), REPORT.MAX_BUNDLE_MODELS)
 
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:

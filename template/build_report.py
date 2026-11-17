@@ -7,12 +7,17 @@ import argparse
 import csv
 import html
 import json
+import math
 import re
 from pathlib import Path
 from urllib.parse import quote
 
 SAMPLE_RE = re.compile(r"seed-(\d+)_sample-(\d+)")
 METRIC_KEYS = ("mean_plddt", "ptm", "iptm", "ranking_score")
+# The bundle is a convenience, not the archive: bounding it keeps report
+# generation cheap at the form's maximum (32 seeds x 100 samples) and keeps
+# the PDB's 5-digit atom serial from overflowing.
+MAX_BUNDLE_MODELS = 200
 
 
 def load_json(path: Path) -> dict:
@@ -49,20 +54,25 @@ def sample_order(path: Path) -> tuple[int, int, str]:
 
 
 def aggregate_metric(summaries: list[dict], key: str) -> float | None:
-    """Mean of the numeric values one metric takes across samples.
+    """Mean of the finite numeric values one metric takes across samples.
 
     Averaging matters once a run produces many frames; absent values stay
-    absent rather than becoming an arbitrary sample's value.
+    absent. NaN is absent too: json round-trips it happily, and a single NaN
+    sample would otherwise poison the mean and flip the confidence logic.
     """
     numbers = [value for value in (summary.get(key) for summary in summaries)
-               if isinstance(value, (int, float))]
+               if isinstance(value, (int, float)) and not isinstance(value, bool)
+               and math.isfinite(value)]
     return sum(numbers) / len(numbers) if numbers else None
 
 
-def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> Path | None:
-    """One multi-model PDB holding every frame, for viewers that load a whole
-    ensemble or trajectory at once. Uses the container's biopython; skipped
-    (never fatal) when it is unavailable or a frame cannot be parsed."""
+def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tuple[Path, int] | None:
+    """One multi-model PDB holding the frames, for viewers that load a whole
+    ensemble or trajectory at once. Uses the container's biopython; best
+    effort by contract -- returns None on any problem and never lets an
+    exception reach the report. Returns the path and the number of models
+    actually bundled (capped, see MAX_BUNDLE_MODELS).
+    """
     if not frames:
         return None
     try:
@@ -70,32 +80,36 @@ def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> Path
 
         from Bio.PDB import MMCIFParser, PDBIO
         from Bio.PDB.Structure import Structure
-    except ImportError:
-        return None
-    parser = MMCIFParser(QUIET=True)
-    combined = Structure(id="ensemble")
-    model_id = 0
-    for frame in frames:
-        try:
-            structure = parser.get_structure("frame", str(frame))
-        except Exception:
-            continue
-        for model in structure:
-            clone = copy.deepcopy(model)
-            clone.id = model_id
-            clone.parent = combined
-            combined.add(clone)
-            model_id += 1
-    if model_id == 0:
-        return None
-    out = root / f"{job_name}_ensemble.pdb"
-    try:
+
+        parser = MMCIFParser(QUIET=True)
+        combined = Structure(id="ensemble")
+        model_id = 0
+        for frame in frames:
+            if model_id >= MAX_BUNDLE_MODELS:
+                break
+            try:
+                structure = parser.get_structure("frame", str(frame))
+                for model in structure:
+                    clone = copy.deepcopy(model)
+                    clone.id = model_id
+                    clone.parent = combined
+                    combined.add(clone)
+                    model_id += 1
+                    if model_id >= MAX_BUNDLE_MODELS:
+                        break
+            except Exception:
+                continue  # one unreadable frame must not sink the bundle
+        if model_id == 0:
+            return None
+        out = root / f"{job_name}_ensemble.pdb"
         io = PDBIO()
         io.set_structure(combined)
         io.save(str(out))
+        return out, model_id
     except Exception:
+        # Memory pressure, a biopython defect, a full disk: the report is the
+        # deliverable, the bundle is a convenience.
         return None
-    return out
 
 
 def build(root: Path) -> tuple[str, dict]:
@@ -120,7 +134,9 @@ def build(root: Path) -> tuple[str, dict]:
     # The bundle holds the per-sample frames; the job-level CIF duplicates one
     # of them and would repeat a model.
     frames = [path for path in cifs if SAMPLE_RE.search(str(path))] or cifs
-    bundle = write_ensemble_bundle(root, str(job_name), frames)
+    bundle_result = write_ensemble_bundle(root, str(job_name), frames)
+    bundle, bundle_models = bundle_result if bundle_result else (None, 0)
+    bundle_truncated = bool(bundle) and bundle_models < len(frames)
 
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [load_json(path) for path in physicality_files]
@@ -133,7 +149,13 @@ def build(root: Path) -> tuple[str, dict]:
         except OSError:
             ranking_rows = []
 
-    no_confidence = not any(value not in (None, 0, 0.0) for value in metrics.values())
+    # NaN must count as absent: json round-trips it, and a single NaN sample
+    # would otherwise suppress the "no confidence head" warning.
+    def meaningful(value: object) -> bool:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value != 0)
+
+    no_confidence = not any(meaningful(value) for value in metrics.values())
 
     lag_ns = metadata.get("lag_ns") or 0
     frame_rows = []
@@ -189,13 +211,15 @@ def build(root: Path) -> tuple[str, dict]:
     )
 
     # Ranking is a structure-prediction concept. Ensemble draws are
-    # equiprobable and trajectory frames are time-ordered; with the confidence
-    # head absent every score is NaN anyway, and presenting them under a
-    # "Ranking" heading invites exactly the wrong reading.
-    any_score = any(
-        isinstance(row.get("ranking_score"), (int, float)) and row["ranking_score"] == row["ranking_score"]
-        for row in ranking_rows
-    )
+    # equiprobable and trajectory frames are time-ordered. csv.DictReader
+    # yields strings, so a numeric score has to be parsed before it counts.
+    def finite_score(row: dict) -> bool:
+        try:
+            return math.isfinite(float(row.get("ranking_score", "")))
+        except (TypeError, ValueError):
+            return False
+
+    any_score = any(finite_score(row) for row in ranking_rows)
     ranking_table = ""
     if ranking_rows and (kind == "structure" or any_score):
         columns = list(ranking_rows[0])
@@ -206,10 +230,13 @@ def build(root: Path) -> tuple[str, dict]:
             for row in ranking_rows
         ) + "</tbody></table></div>"
 
-    bundle_row = (
-        f'<li><a href="{html.escape(relative_link(bundle, root), quote=True)}">{html.escape(bundle.name)}</a>'
-        f" — all frames as one multi-model file</li>" if bundle else ""
-    )
+    bundle_row = ""
+    if bundle:
+        truncated = f" (first {bundle_models} of {len(frames)} frames)" if bundle_truncated else ""
+        bundle_row = (
+            f'<li><a href="{html.escape(relative_link(bundle, root), quote=True)}">{html.escape(bundle.name)}</a>'
+            f" — all frames as one multi-model file{html.escape(truncated)}</li>"
+        )
     report = {
         "metadata": metadata,
         "summary": summary,
@@ -219,6 +246,8 @@ def build(root: Path) -> tuple[str, dict]:
         "confidence_available": not no_confidence,
         "structures": [path.relative_to(root).as_posix() for path in cifs],
         "ensemble_bundle": bundle.relative_to(root).as_posix() if bundle else None,
+        "ensemble_bundle_frames": bundle_models if bundle else 0,
+        "ensemble_bundle_truncated": bundle_truncated,
         "physicality_reports": [path.relative_to(root).as_posix() for path in physicality_files],
         "ranking": ranking_rows,
     }
