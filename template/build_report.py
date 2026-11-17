@@ -73,22 +73,22 @@ def aggregate_metric(summaries: list[dict], key: str) -> float | None:
     return sum(numbers) / len(numbers) if numbers else None
 
 
-def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tuple[Path, int, bool] | None:
-    """One multi-model PDB holding the frames, for viewers that load a whole
-    ensemble or trajectory at once. Uses the container's biopython; best
-    effort by contract -- returns None on any problem and never lets an
-    exception reach the report. Returns the path, the number of models
-    actually bundled (capped, see MAX_BUNDLE_MODELS), and whether the cap cut
-    content short. Truncation is about the CAP, not about unreadable frames:
-    a skipped frame is not "truncated", and multi-model CIFs can fill the cap
-    with fewer frames than models.
+def load_combined_frames(frames: list[Path]) -> tuple[object, int, bool] | None:
+    """Parse every frame into one multi-model Structure, shared by the PDB
+    bundle and the preview. Best effort by contract -- returns None on any
+    problem and never lets an exception reach the report. Returns the
+    structure, the number of models actually loaded (capped, see
+    MAX_BUNDLE_MODELS), and whether the cap cut content short. Truncation is
+    about the CAP, not about unreadable frames: a skipped frame is not
+    "truncated", and multi-model CIFs can fill the cap with fewer frames than
+    models.
     """
     if not frames:
         return None
     try:
         import copy
 
-        from Bio.PDB import MMCIFParser, PDBIO
+        from Bio.PDB import MMCIFParser
         from Bio.PDB.Structure import Structure
 
         parser = MMCIFParser(QUIET=True)
@@ -114,14 +114,110 @@ def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tupl
                 continue  # one unreadable frame must not sink the bundle
         if model_id == 0:
             return None
+        return combined, model_id, truncated
+    except Exception:
+        # Memory pressure, a biopython defect, a full disk: the report is the
+        # deliverable, the bundle is a convenience.
+        return None
+
+
+def write_ensemble_bundle(root: Path, job_name: str, combined: object) -> Path | None:
+    """Write the loaded multi-model structure as one PDB file."""
+    try:
+        from Bio.PDB import PDBIO
+
         out = root / f"{job_name}_ensemble.pdb"
         io = PDBIO()
         io.set_structure(combined)
         io.save(str(out))
-        return out, model_id, truncated
+        return out
     except Exception:
-        # Memory pressure, a biopython defect, a full disk: the report is the
-        # deliverable, the bundle is a convenience.
+        return None
+
+
+def ca_traces(combined: object) -> list:
+    """Per-model C-alpha coordinate arrays; models without C-alphas (ligand
+    or nucleotide-only frames) are skipped."""
+    try:
+        import numpy
+
+        return [
+            numpy.array([atom.coord.astype(float) for atom in model.get_atoms()
+                         if atom.name == "CA"], dtype=float)
+            for model in combined
+        ]
+    except Exception:
+        return []
+
+
+def pairwise_ca_rmsd(traces: list, cap: int = 50) -> object | None:
+    """Symmetric pairwise C-alpha RMSD matrix (optimal superposition via
+    biopython's SVDSuperimposer), capped at `cap` frames. None when fewer
+    than two compatible frames exist."""
+    usable = [trace for trace in traces if len(trace)]
+    if len(usable) < 2 or len({len(trace) for trace in usable[:cap]}) != 1:
+        return None  # a compatible RMSD needs identical C-alpha counts
+    usable = usable[:cap]
+    try:
+        import numpy
+
+        from Bio.SVDSuperimposer import SVDSuperimposer
+
+        n = len(usable)
+        matrix = numpy.zeros((n, n))
+        sup = SVDSuperimposer()
+        for i in range(n):
+            for j in range(i + 1, n):
+                sup.set(usable[i], usable[j])  # (reference, mobile) coordinate arrays
+                sup.run()
+                matrix[i, j] = matrix[j, i] = float(sup.get_rms())
+        return matrix
+    except Exception:
+        return None
+
+
+def write_ensemble_preview(root: Path, job_name: str, traces: list, rmsd: object) -> Path | None:
+    """A static preview image: every frame's C-alpha trace overlaid in 3D,
+    beside the pairwise RMSD matrix. Rendered with matplotlib (Agg) inside
+    the container; skipped, never fatal, when unavailable."""
+    if not traces:
+        return None
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=(11.0, 4.4))
+        axis = fig.add_subplot(1, 2, 1, projection="3d")
+        cmap = plt.get_cmap("viridis")
+        drawn = 0
+        for index, coords in enumerate(traces):
+            if not len(coords):
+                continue
+            colour = cmap(index / max(len(traces) - 1, 1))
+            axis.plot(coords[:, 0], coords[:, 1], coords[:, 2],
+                      color=colour, linewidth=1.4, alpha=0.85)
+            drawn += 1
+        axis.set_title(f"C-alpha traces ({drawn} frames)", fontsize=10)
+        axis.set_xlabel("x (A)", fontsize=7)
+        axis.set_ylabel("y (A)", fontsize=7)
+        axis.tick_params(labelsize=6)
+        grid = fig.add_subplot(1, 2, 2)
+        if rmsd is not None:
+            image = grid.imshow(rmsd, cmap="magma", origin="lower")
+            fig.colorbar(image, ax=grid, label="C-alpha RMSD (A)")
+            grid.set_title("Pairwise RMSD", fontsize=10)
+        else:
+            grid.text(0.5, 0.5, "no pairwise RMSD\n(frames lack compatible C-alphas)",
+                      ha="center", va="center", fontsize=9)
+            grid.set_axis_off()
+        out = root / f"{job_name}_preview.png"
+        fig.tight_layout()
+        fig.savefig(str(out), dpi=110)
+        plt.close(fig)
+        return out
+    except Exception:
         return None
 
 
@@ -171,8 +267,26 @@ def build(root: Path) -> tuple[str, dict]:
     # The bundle holds the per-sample frames; the job-level CIF duplicates one
     # of them and would repeat a model.
     frames = [path for path in cifs if SAMPLE_RE.search(str(path))] or cifs
-    bundle_result = write_ensemble_bundle(root, str(job_name), frames)
-    bundle, bundle_models, bundle_truncated = bundle_result if bundle_result else (None, 0, False)
+    loaded = load_combined_frames(frames)
+    bundle = preview = None
+    bundle_models = 0
+    bundle_truncated = False
+    rmsd_stats = {"mean_pairwise": None, "max_pairwise": None, "frames_compared": 0}
+    if loaded:
+        combined, bundle_models, bundle_truncated = loaded
+        bundle = write_ensemble_bundle(root, str(job_name), combined)
+        traces = ca_traces(combined)
+        rmsd = pairwise_ca_rmsd(traces)
+        if rmsd is not None:
+            import numpy
+
+            upper = rmsd[numpy.triu_indices_from(rmsd, k=1)]
+            rmsd_stats = {
+                "mean_pairwise": float(upper.mean()) if upper.size else None,
+                "max_pairwise": float(upper.max()) if upper.size else None,
+                "frames_compared": int(rmsd.shape[0]),
+            }
+        preview = write_ensemble_preview(root, str(job_name), traces, rmsd)
 
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [(path, load_json(path)) for path in physicality_files]
@@ -279,6 +393,21 @@ def build(root: Path) -> tuple[str, dict]:
             for row in ranking_rows
         ) + "</tbody></table></div>"
 
+    import base64
+
+    preview_img = ""
+    if preview and preview.is_file():
+        encoded = base64.b64encode(preview.read_bytes()).decode("ascii")
+        preview_img = (f'<img src="data:image/png;base64,{encoded}" '
+                       f'alt="Ensemble preview: C-alpha traces and pairwise RMSD" '
+                       f'style="max-width:100%;height:auto;border-radius:8px">')
+
+    spread_note = ""
+    if rmsd_stats["mean_pairwise"] is not None and kind in ("ensemble", "trajectory"):
+        spread_note = (f"Backbone spread across {rmsd_stats['frames_compared']} compared frames: "
+                       f"mean pairwise C-alpha RMSD {rmsd_stats['mean_pairwise']:.2f} A, "
+                       f"max {rmsd_stats['max_pairwise']:.2f} A.")
+
     bundle_row = ""
     if bundle:
         truncated = f" (first {bundle_models} of {len(frames)} frames)" if bundle_truncated else ""
@@ -297,6 +426,8 @@ def build(root: Path) -> tuple[str, dict]:
         "ensemble_bundle": bundle.relative_to(root).as_posix() if bundle else None,
         "ensemble_bundle_frames": bundle_models if bundle else 0,
         "ensemble_bundle_truncated": bundle_truncated,
+        "preview": preview.relative_to(root).as_posix() if preview else None,
+        "rmsd": rmsd_stats,
         "physicality_reports": [path.relative_to(root).as_posix() for path in physicality_files],
         "physicality_summary": {
             "passed": physicality_passed,
@@ -316,7 +447,7 @@ def build(root: Path) -> tuple[str, dict]:
 <tr><th>Stored weights</th><td>{html.escape(display(metadata.get('weights_precision')))}</td></tr>
 <tr><th>Structures</th><td>{len(cifs)}</td></tr></table></div>
 <div class="card"><h2>{html.escape(summary_heading)}</h2>{confidence_note}<table>{metric_rows}</table><p>{html.escape(physicality_note)}</p></div>
-<div class="card"><h2>{html.escape(heading)}</h2>{f'<p>{html.escape(framing_note)}</p>' if framing_note else ''}<ul>{file_rows}{bundle_row}</ul></div>
+<div class="card"><h2>{html.escape(heading)}</h2>{f'<p>{html.escape(framing_note)}</p>' if framing_note else ''}{f'<p class="muted">{html.escape(spread_note)}</p>' if spread_note else ''}{preview_img}<ul>{file_rows}{bundle_row}</ul></div>
 <div class="card">{ranking_table}<p><a href="report.json">Machine-readable report</a> · <a href="fold_input.json">Resolved fold input</a> · <a href="run_metadata.json">Run metadata</a></p></div>
 </main></body></html>"""
     return document, report
