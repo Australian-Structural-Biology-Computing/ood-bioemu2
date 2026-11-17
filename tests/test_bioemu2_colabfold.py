@@ -380,6 +380,45 @@ class ReportTests(unittest.TestCase):
             structure = parser.get_structure("b", str(root / report["ensemble_bundle"]))
             self.assertEqual(len(list(structure)), REPORT.MAX_BUNDLE_MODELS)
 
+    def test_unreadable_frame_is_not_reported_as_truncation(self):
+        # A skipped frame is not a truncation: the cap, not the parse, defines
+        # truncation. One garbage CIF beside two valid ones must bundle both
+        # valid frames and report ensemble_bundle_truncated = False.
+        try:
+            from Bio.PDB import MMCIFIO
+            from Bio.PDB.Structure import Structure
+            from Bio.PDB.Model import Model
+            from Bio.PDB.Chain import Chain
+            from Bio.PDB.Residue import Residue
+            from Bio.PDB.Atom import Atom
+        except ImportError:
+            self.skipTest("biopython unavailable on this host")
+
+        def frame_cif(path: Path) -> None:
+            structure = Structure("frame")
+            model = Model(0)
+            chain = Chain("A")
+            residue = Residue((" ", 1, " "), "ALA", " ")
+            for index, name in enumerate(("N", "CA", "C")):
+                residue.add(Atom(name, (index * 1.5, 0.0, 0.0), 1.0, 0.0, " ", name, 1, "N"))
+            chain.add(residue)
+            model.add(chain)
+            structure.add(model)
+            io = MMCIFIO()
+            io.set_structure(structure)
+            io.save(str(path))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            frame_cif(job / "job_seed-1_sample-0_model.cif")
+            (job / "job_seed-1_sample-1_model.cif").write_text("this is not a CIF\n", encoding="utf-8")
+            frame_cif(job / "job_seed-1_sample-2_model.cif")
+            document, report = REPORT.build(root)
+            self.assertFalse(report["ensemble_bundle_truncated"])
+            self.assertEqual(report["ensemble_bundle_frames"], 2)
+            self.assertNotIn("first 2 of", document)
+
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})

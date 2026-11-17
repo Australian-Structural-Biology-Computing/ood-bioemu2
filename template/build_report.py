@@ -66,12 +66,15 @@ def aggregate_metric(summaries: list[dict], key: str) -> float | None:
     return sum(numbers) / len(numbers) if numbers else None
 
 
-def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tuple[Path, int] | None:
+def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tuple[Path, int, bool] | None:
     """One multi-model PDB holding the frames, for viewers that load a whole
     ensemble or trajectory at once. Uses the container's biopython; best
     effort by contract -- returns None on any problem and never lets an
-    exception reach the report. Returns the path and the number of models
-    actually bundled (capped, see MAX_BUNDLE_MODELS).
+    exception reach the report. Returns the path, the number of models
+    actually bundled (capped, see MAX_BUNDLE_MODELS), and whether the cap cut
+    content short. Truncation is about the CAP, not about unreadable frames:
+    a skipped frame is not "truncated", and multi-model CIFs can fill the cap
+    with fewer frames than models.
     """
     if not frames:
         return None
@@ -84,19 +87,22 @@ def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tupl
         parser = MMCIFParser(QUIET=True)
         combined = Structure(id="ensemble")
         model_id = 0
+        truncated = False
         for frame in frames:
             if model_id >= MAX_BUNDLE_MODELS:
+                truncated = True  # frames remain unattempted
                 break
             try:
                 structure = parser.get_structure("frame", str(frame))
                 for model in structure:
+                    if model_id >= MAX_BUNDLE_MODELS:
+                        truncated = True  # models of this frame dropped
+                        break
                     clone = copy.deepcopy(model)
                     clone.id = model_id
                     clone.parent = combined
                     combined.add(clone)
                     model_id += 1
-                    if model_id >= MAX_BUNDLE_MODELS:
-                        break
             except Exception:
                 continue  # one unreadable frame must not sink the bundle
         if model_id == 0:
@@ -105,7 +111,7 @@ def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tupl
         io = PDBIO()
         io.set_structure(combined)
         io.save(str(out))
-        return out, model_id
+        return out, model_id, truncated
     except Exception:
         # Memory pressure, a biopython defect, a full disk: the report is the
         # deliverable, the bundle is a convenience.
@@ -135,8 +141,7 @@ def build(root: Path) -> tuple[str, dict]:
     # of them and would repeat a model.
     frames = [path for path in cifs if SAMPLE_RE.search(str(path))] or cifs
     bundle_result = write_ensemble_bundle(root, str(job_name), frames)
-    bundle, bundle_models = bundle_result if bundle_result else (None, 0)
-    bundle_truncated = bool(bundle) and bundle_models < len(frames)
+    bundle, bundle_models, bundle_truncated = bundle_result if bundle_result else (None, 0, False)
 
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
     physicality = [load_json(path) for path in physicality_files]
