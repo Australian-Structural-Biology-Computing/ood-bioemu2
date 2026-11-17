@@ -452,9 +452,13 @@ class ReportTests(unittest.TestCase):
             document, report = REPORT.build(root)
             self.assertTrue(report["interactive_viewer"])
             self.assertIn("Interactive 3D view", document)
-            self.assertIn('src="3Dmol.min.js"', document)
+            # The viewer is INLINED, not referenced: a downloaded report.html
+            # must work as a single file.
+            self.assertNotIn('src="3Dmol.min.js"', document)
+            vendored_head = (ROOT / "template" / "3Dmol.min.js").read_text(encoding="utf-8")[:200]
+            self.assertIn(vendored_head[:120], document)
             self.assertIn("ensemblePdbData", document)
-            self.assertTrue((root / "3Dmol.min.js").is_file())
+            self.assertFalse((root / "3Dmol.min.js").exists())
 
     def test_interactive_viewer_override_env(self):
         import os
@@ -475,8 +479,7 @@ class ReportTests(unittest.TestCase):
                 else:
                     os.environ["BIOEMU2_3DMOL_JS"] = saved
             self.assertTrue(report["interactive_viewer"])
-            copied = root / "3Dmol.min.js"
-            self.assertIn("// custom viewer build", copied.read_text(encoding="utf-8"))
+            self.assertIn("// custom viewer build", document)
 
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:

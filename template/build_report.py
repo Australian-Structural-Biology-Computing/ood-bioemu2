@@ -271,34 +271,36 @@ def viewer_js_source() -> Path | None:
 
 
 def interactive_viewer_block(root: Path, bundle: Path | None, frame_count: int) -> tuple[str, bool]:
-    """The 3Dmol.js card for the report: the vendored viewer script is copied
-    next to report.html (same origin, no external service), the bundled PDB
-    is inlined as JSON, and a slider flips through the frames. Best effort --
-    any problem returns an empty fragment and the static preview remains."""
+    """The 3Dmol.js card for the report: the vendored viewer is INLINED into
+    the HTML (not referenced as a sibling file), the bundled PDB is inlined
+    as JSON, and a slider flips through the frames. Inlining makes the single
+    downloaded report.html fully standalone -- a relative script reference
+    breaks the moment a user saves the file locally, which is exactly how the
+    completed-session report gets read. Best effort -- any problem returns an
+    empty fragment and the static preview remains."""
     if bundle is None or frame_count < 1:
         return "", False
     source = viewer_js_source()
     if source is None:
         return "", False
     try:
+        viewer_code = source.read_text(encoding="utf-8")
         data = bundle.read_text(encoding="utf-8")
     except OSError:
         return "", False
     if len(data.encode("utf-8")) > MAX_INLINE_PDB_BYTES:
         return "", False
-    try:
-        import shutil
-
-        shutil.copyfile(source, root / VIEWER_JS_NAME)
-    except OSError:
-        return "", False
+    # A literal "</script>" inside the vendored code would terminate the tag
+    # early; escape it the standard way ("\\/" is the same character inside
+    # JS strings and regexes).
+    viewer_code = viewer_code.replace("</script", "<\\/script")
 
     noun = "frame" if frame_count == 1 else "frames"
     fragment = (
         "<h2>Interactive 3D view</h2>"
         '<p class="muted">Drag to rotate, scroll to zoom, and use the slider to flip through the '
-        f"{frame_count} {noun}. Rendered locally by the vendored 3Dmol.js; no external service is contacted.</p>"
-        f'<script src="{VIEWER_JS_NAME}"></script>'
+        f"{frame_count} {noun}. The viewer is embedded in this file — it works offline, no external service is contacted.</p>"
+        "<script>\n" + viewer_code + "\n</script>"
         '<div id="ensemble-viewer" style="width:100%;height:440px;position:relative"></div>'
         f'<input id="frame-slider" type="range" min="0" max="{frame_count - 1}" value="0" style="width:100%">'
         '<div id="frame-label" class="muted"></div>'
