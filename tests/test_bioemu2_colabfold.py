@@ -419,6 +419,30 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(report["ensemble_bundle_frames"], 2)
             self.assertNotIn("first 2 of", document)
 
+    def test_physicality_verdicts_surface_per_frame(self):
+        # The confidence columns are all NaN in this port; the physicality
+        # screen is the quality signal the report must surface instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})
+            job = root / "job"
+            for step in (0, 1):
+                (job / f"job_seed-1_sample-{step}_model.cif").write_text("data_test\n", encoding="utf-8")
+            (job / "job_seed-1_sample-0_physicality.json").write_text(
+                json.dumps({"seed": 1, "sample": 0, "status": "passed",
+                            "mode": "high_quality", "stats": {"has_clash": 0.0}}),
+                encoding="utf-8",
+            )
+            (job / "job_seed-1_sample-1_physicality.json").write_text(
+                json.dumps({"seed": 1, "sample": 1, "status": "failed",
+                            "reason": "atom clash", "mode": "high_quality", "stats": {}}),
+                encoding="utf-8",
+            )
+            document, report = REPORT.build(root)
+        self.assertIn("physicality: passed", document)
+        self.assertIn("physicality: failed (atom clash)", document)
+        self.assertIn("1 of 2 frames passed the high_quality physicality screen", document)
+        self.assertEqual(report["physicality_summary"], {"passed": 1, "failed": 1, "frames": 2})
+
     def test_report_explains_missing_confidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.stage(tmp, {"job_name": "job", "mode": "equilibrium"})

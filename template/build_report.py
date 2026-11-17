@@ -20,12 +20,19 @@ METRIC_KEYS = ("mean_plddt", "ptm", "iptm", "ranking_score")
 MAX_BUNDLE_MODELS = 200
 
 
-def load_json(path: Path) -> dict:
+def load_json(path: Path):
+    """Any JSON value -- lists included. The job-level physicality file is a
+    LIST of per-frame entries, and the dict-only loader used to silently turn
+    it into {}, losing every frame's verdict."""
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return {}
+        return None
+
+
+def load_json_dict(path: Path) -> dict:
+    value = load_json(path)
+    return value if isinstance(value, dict) else {}
 
 
 def display(value: object) -> str:
@@ -118,8 +125,32 @@ def write_ensemble_bundle(root: Path, job_name: str, frames: list[Path]) -> tupl
         return None
 
 
+def frame_physicality(entries: list[tuple[Path, object]]) -> dict[tuple[int, int], dict]:
+    """Per-frame physicality verdicts, keyed by (seed, sample).
+
+    Per-sample files hold one dict whose FILENAME carries the frame ids (the
+    dict itself has no seed/sample keys); the job-level file holds a list of
+    entries that do. The same verdict arriving twice is fine -- the map
+    deduplicates -- and entries with no derivable frame are skipped.
+    """
+    keyed: dict[tuple[int, int], dict] = {}
+    for path, data in entries:
+        items = data if isinstance(data, list) else [data]
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            seed, sample = entry.get("seed"), entry.get("sample")
+            if not (isinstance(seed, int) and isinstance(sample, int)) and path is not None:
+                match = SAMPLE_RE.search(str(path))
+                if match:
+                    seed, sample = int(match.group(1)), int(match.group(2))
+            if isinstance(seed, int) and isinstance(sample, int):
+                keyed[(seed, sample)] = entry
+    return keyed
+
+
 def build(root: Path) -> tuple[str, dict]:
-    metadata = load_json(root / "run_metadata.json")
+    metadata = load_json_dict(root / "run_metadata.json")
     job_name = metadata.get("job_name", "")
     job_dir = root / str(job_name)
     mode = metadata.get("mode", "structure")
@@ -127,7 +158,7 @@ def build(root: Path) -> tuple[str, dict]:
     kind = "trajectory" if propagating else ("ensemble" if mode == "equilibrium" else "structure")
 
     summaries = sorted(job_dir.rglob("*_summary_confidences.json")) if job_dir.is_dir() else []
-    summaries_data = [load_json(path) for path in summaries]
+    summaries_data = [load_json_dict(path) for path in summaries]
     summary = summaries_data[0] if summaries_data else {}
     # Aggregate the per-sample summaries; the job-level file covers the same
     # frames again and would double-count them in the mean. It stays the
@@ -144,7 +175,10 @@ def build(root: Path) -> tuple[str, dict]:
     bundle, bundle_models, bundle_truncated = bundle_result if bundle_result else (None, 0, False)
 
     physicality_files = sorted(job_dir.rglob("*physicality*.json")) if job_dir.is_dir() else []
-    physicality = [load_json(path) for path in physicality_files]
+    physicality = [(path, load_json(path)) for path in physicality_files]
+    physicality_by_frame = frame_physicality(physicality)
+    physicality_passed = sum(1 for entry in physicality_by_frame.values() if entry.get("status") == "passed")
+    physicality_failed = len(physicality_by_frame) - physicality_passed
     ranking_files = sorted(job_dir.rglob("*_ranking_scores.csv")) if job_dir.is_dir() else []
     ranking_rows: list[dict] = []
     if ranking_files:
@@ -166,13 +200,21 @@ def build(root: Path) -> tuple[str, dict]:
     frame_rows = []
     for path in cifs:
         label = path.relative_to(root).as_posix()
-        if propagating:
-            match = SAMPLE_RE.search(label)
-            if match:
+        verdict = ""
+        match = SAMPLE_RE.search(label)
+        if match:
+            if propagating:
                 step = int(match.group(2))
                 label += f" — step {step}, t = {step * float(lag_ns):g} ns"
+            entry = physicality_by_frame.get((int(match.group(1)), int(match.group(2))))
+            if entry:
+                status = str(entry.get("status", "unknown"))
+                verdict = f" · physicality: {status}"
+                if status != "passed" and entry.get("reason"):
+                    verdict += f" ({entry.get('reason')})"
         frame_rows.append(
-            f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(label)}</a></li>'
+            f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(label)}</a>'
+            f'{html.escape(verdict)}</li>'
         )
     file_rows = "".join(frame_rows) or "<li>No CIF files found.</li>"
 
@@ -210,8 +252,10 @@ def build(root: Path) -> tuple[str, dict]:
         if no_confidence else ""
     )
     physicality_note = (
-        f"{len(physicality_files)} physicality report file(s) were produced. Failed checks do not remove structures."
-        if physicality_files else
+        (f"{physicality_passed} of {len(physicality_by_frame)} frames passed the "
+         f"{html.escape(str(metadata.get('physicality') or 'high_quality'))} physicality screen"
+         + (f"; {physicality_failed} failed but remain in the output." if physicality_failed else "."))
+        if physicality_by_frame else
         "No separate physicality JSON was found; inspect the job log before using these structures."
     )
 
@@ -254,6 +298,11 @@ def build(root: Path) -> tuple[str, dict]:
         "ensemble_bundle_frames": bundle_models if bundle else 0,
         "ensemble_bundle_truncated": bundle_truncated,
         "physicality_reports": [path.relative_to(root).as_posix() for path in physicality_files],
+        "physicality_summary": {
+            "passed": physicality_passed,
+            "failed": physicality_failed,
+            "frames": len(physicality_by_frame),
+        },
         "ranking": ranking_rows,
     }
     document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
