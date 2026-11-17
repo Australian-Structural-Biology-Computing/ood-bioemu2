@@ -61,6 +61,13 @@ def build(root: Path) -> tuple[str, dict]:
         f'<li><a href="{html.escape(relative_link(path, root), quote=True)}">{html.escape(path.relative_to(root).as_posix())}</a></li>'
         for path in cifs
     ) or "<li>No CIF files found.</li>"
+    propagation = metadata.get("propagation_steps")
+    propagation_row = (
+        f"<tr><th>Trajectory</th><td>{html.escape(str(metadata.get('propagation_steps')))} steps "
+        f"x {html.escape(str(metadata.get('lag_ns')))} ns per step, propagated from "
+        f"{html.escape(str(metadata.get('propagate_from')))}</td></tr>"
+        if propagation else ""
+    )
     metric_rows = "".join(
         f"<tr><th>{html.escape(label)}</th><td>{html.escape(display(value))}</td></tr>"
         for label, value in (
@@ -103,7 +110,7 @@ def build(root: Path) -> tuple[str, dict]:
 <style>body{{margin:0;background:#f4f7f9;color:#172033;font:16px/1.5 system-ui}}main{{max-width:960px;margin:3rem auto;padding:0 1rem}}.card{{background:white;border:1px solid #dbe4ee;border-radius:16px;padding:1.5rem;box-shadow:0 8px 30px #0f172a12;margin:1rem 0}}h1,h2{{line-height:1.15}}.muted{{color:#64748b}}.note{{padding:1rem;border-left:4px solid #d97706;background:#fffbeb}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;text-align:left;border-bottom:1px solid #e2e8f0}}.scroll{{overflow:auto}}code{{background:#eef2f7;padding:.15rem .35rem;border-radius:4px}}a{{color:#0369a1}}</style>
 </head><body><main><p class="muted">ColabFold2 preview · BioEmu2</p><h1>{html.escape(str(job_name))}</h1>
 <div class="card"><h2>Run</h2><table>
-<tr><th>Task</th><td>{html.escape(display(metadata.get('mode')))}</td></tr>
+<tr><th>Task</th><td>{html.escape(display(metadata.get('mode')))}</td></tr>{propagation_row}
 <tr><th>Sampler</th><td>{html.escape(display(metadata.get('sampler')))}</td></tr>
 <tr><th>MSA</th><td>{html.escape(display(metadata.get('msa_mode')))}</td></tr>
 <tr><th>Stored weights</th><td>{html.escape(display(metadata.get('weights_precision')))}</td></tr>

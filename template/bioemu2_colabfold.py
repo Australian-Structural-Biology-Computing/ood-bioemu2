@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -268,9 +269,54 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--mode", choices=("structure", "equilibrium"), default="structure")
     result.add_argument("--sampler", choices=("edm", "edm_gd", "edm_fk", "edm_fkc"), default="edm")
     result.add_argument("--physicality", choices=("high_quality", "no_violations", "high_quality_per_residue", "no_filter"), default="high_quality")
+    result.add_argument("--propagate-from", default="")
+    result.add_argument("--propagation-steps", type=int, default=None)
+    result.add_argument("--lag-ns", type=float, default=None)
     result.add_argument("--weights-precision", choices=BIOEMU2_PRECISIONS, default="int8")
     result.add_argument("--allow-weight-download", action="store_true")
     return result
+
+
+def effective_mode(args: argparse.Namespace) -> str:
+    """The sampling mode a run gets, given the propagation request.
+
+    Upstream defines propagation as equilibrium sampling by construction:
+    with a starting frame set, BIOEMU2_MODE must be unset or 'equilibrium',
+    and 'structure' is rejected (alphafold3/model/pipeline/bioemu2_features.py,
+    mode()). The app mirrors that contract with a message that names the form
+    control, instead of the deep-in-inference error the raw contract produces.
+    """
+    if not args.propagate_from:
+        return args.mode
+    if args.mode != "equilibrium":
+        raise InputError(
+            "trajectory propagation samples the equilibrium ensemble; set the "
+            "task to 'Equilibrium ensemble sampling' or clear the starting structure"
+        )
+    return args.mode
+
+
+def propagation_flags(args: argparse.Namespace) -> list[str]:
+    """Runner flags for trajectory propagation, or [] when not propagating.
+
+    steps is bounded on the app side because the runtime scales with it and
+    the allocation is capped at 48 h; lag must be finite and positive, which
+    is exactly the contract upstream enforces later (add_propagation).
+    """
+    if not args.propagate_from:
+        return []
+    start = Path(args.propagate_from)
+    if not start.is_file():
+        raise RuntimeError(f"the propagation start structure is unavailable: {start}")
+    if args.propagation_steps is None or not 1 <= args.propagation_steps <= 100:
+        raise InputError("propagation steps must be between 1 and 100")
+    if args.lag_ns is None or not math.isfinite(args.lag_ns) or args.lag_ns <= 0:
+        raise InputError("the lag time must be a positive, finite number of nanoseconds")
+    return [
+        f"--bioemu2_propagate_from={start}",
+        f"--bioemu2_propagation_steps={args.propagation_steps}",
+        f"--bioemu2_lag_ns={args.lag_ns}",
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -292,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
     input_path.write_text(json.dumps(fold_input, indent=2) + "\n", encoding="utf-8")
 
     attention, xla_additions = detect_accelerator()
+    mode = effective_mode(args)
+    propagation = propagation_flags(args)
     env = os.environ.copy()
     current_xla = env.get("XLA_FLAGS", "")
     for addition in xla_additions:
@@ -315,9 +363,10 @@ def main(argv: list[str] | None = None) -> int:
         f"--flash_attention_implementation={attention}",
         f"--num_recycles={args.num_recycles}",
         f"--num_diffusion_samples={args.num_diffusion_samples}",
-        f"--bioemu2_mode={args.mode}",
+        f"--bioemu2_mode={mode}",
         f"--bioemu2_sampler={args.sampler}",
         f"--bioemu2_physicality={args.physicality}",
+        *propagation,
     ]
     if args.msa_mode == "mmseqs2_server":
         command.append("--use_msa_server")
@@ -326,13 +375,18 @@ def main(argv: list[str] | None = None) -> int:
         "model": "bioemu2",
         "colabfold_runner": "alphafold3-colabfold 3.1.18",
         "job_name": job_name,
-        "mode": args.mode,
+        "mode": mode,
         "sampler": args.sampler,
         "physicality": args.physicality,
         "weights_precision": args.weights_precision,
         "msa_mode": args.msa_mode,
         "num_recycles": args.num_recycles,
         "num_diffusion_samples": args.num_diffusion_samples,
+        **({
+            "propagate_from": args.propagate_from,
+            "propagation_steps": args.propagation_steps,
+            "lag_ns": args.lag_ns,
+        } if propagation else {}),
         "attention": attention,
         "xla_flags": current_xla,
         "command": command,

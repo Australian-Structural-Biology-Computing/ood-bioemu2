@@ -122,6 +122,23 @@ if [[ -f "${PROTEIN_INPUT}" ]]; then
   PROTEIN_INPUT="${FASTA_INPUT}"
   echo "Copied selected FASTA input into the run work directory."
 fi
+# A starting structure for trajectory propagation, same pattern as the FASTA:
+# copied into the private work directory so the container can read it, however
+# the session sandbox sees the original. It must be an mmCIF of this same
+# input -- upstream validates that every input atom is present and fails the
+# run otherwise.
+PROPAGATE_FROM_INPUT=<%= Shellwords.escape(context.propagate_from.to_s) %>
+if [[ -n "${PROPAGATE_FROM_INPUT}" ]]; then
+  if [[ ! -f "${PROPAGATE_FROM_INPUT}" ]]; then
+    echo "ERROR: the propagation start structure is not a readable file: ${PROPAGATE_FROM_INPUT}" >&2
+    exit 1
+  fi
+  X0_INPUT="${WORK_DIR}/propagate_from.cif"
+  cp -- "${PROPAGATE_FROM_INPUT}" "${X0_INPUT}"
+  chmod 600 "${X0_INPUT}"
+  PROPAGATE_FROM_INPUT="${X0_INPUT}"
+  echo "Copied the propagation start structure into the run work directory."
+fi
 # alphafold3.model.weights.ensure_weights accepts ANY *.bin.zst already present
 # in --model_dir and never re-checks the requested precision, so per-precision
 # directories only isolate the representations if the gate demands the exact
@@ -252,6 +269,9 @@ apptainer exec --nv --cleanenv \
     --num-diffusion-samples <%= Shellwords.escape(context.num_diffusion_samples.to_s) %> \
     --sampler <%= Shellwords.escape(context.sampler.to_s) %> \
     --physicality <%= Shellwords.escape(context.physicality.to_s) %> \
+    --propagate-from "${PROPAGATE_FROM_INPUT}" \
+    --propagation-steps <%= Shellwords.escape(context.propagation_steps.to_s) %> \
+    --lag-ns <%= Shellwords.escape(context.lag_ns.to_s) %> \
     --weights-precision "${WEIGHTS_PRECISION}" \
     "${ALLOW_DOWNLOAD[@]}"
 

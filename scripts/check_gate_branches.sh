@@ -12,7 +12,8 @@ root, tmp = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 CTX = {"weights_precision": "int8", "protein_input": "ACDE", "dna_input": "", "rna_input": "",
        "ligand_ccd": "", "ligand_smiles": "", "bioemu2_mode": "structure", "msa_mode": "single_sequence",
        "seeds": "1", "num_recycles": "1", "num_diffusion_samples": "1", "sampler": "edm",
-       "physicality": "high_quality", "run_name": "gate_probe"}
+       "physicality": "high_quality", "propagate_from": "", "propagation_steps": "1",
+       "lag_ns": "1", "run_name": "gate_probe"}
 def esc(v): return "'" + str(v).replace("'", "'\\''") + "'"
 def expr(m):
     inner = m.group(1).strip()

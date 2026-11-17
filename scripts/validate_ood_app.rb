@@ -35,6 +35,9 @@ class TemplateContext
       num_diffusion_samples: 5,
       sampler: "edm",
       physicality: "high_quality",
+      propagate_from: "",
+      propagation_steps: 1,
+      lag_ns: "1",
       weights_precision: "int8"
     )
   end

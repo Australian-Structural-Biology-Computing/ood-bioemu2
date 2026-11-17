@@ -40,6 +40,9 @@ form:
   - num_diffusion_samples
   - sampler
   - physicality
+  - propagate_from
+  - propagation_steps
+  - lag_ns
   - weights_precision
   - email_on_terminated
   - citation_request
@@ -182,6 +185,33 @@ attributes:
       - ["High quality per residue", "high_quality_per_residue"]
       - ["Do not check", "no_filter"]
     help: "Checks are reported per structure; failed structures remain in the output."
+
+  propagate_from:
+    widget: "path_selector"
+    cacheable: false
+    header: "## Trajectory propagation"
+    label: "Propagate from structure (optional)"
+    placeholder: "path/to/starting_structure.cif"
+    popup_title: "Select a starting mmCIF"
+    show_files: true
+    show_hidden: false
+    help: |
+      Optional. Leave empty to sample independent equilibrium conformations. Given a starting mmCIF of this same input — for example a sample from an earlier run — the model instead propagates it through time: each sample becomes a trajectory of the given number of steps, one lag time apart. Propagation requires the task above to be <b>Equilibrium ensemble sampling</b>.
+
+  propagation_steps:
+    widget: "number_field"
+    label: "Propagation steps per trajectory"
+    value: 1
+    min: 1
+    max: 100
+    help: "Only used when a starting structure is given. Each step advances the simulated time by the lag, and runtime grows with the step count."
+
+  lag_ns:
+    widget: "text_field"
+    label: "Lag time per step (ns)"
+    value: "1"
+    pattern: '^[0-9]+(\.[0-9]+)?$'
+    help: "Only used when a starting structure is given. Simulated time between trajectory frames, in nanoseconds; must be positive."
 
   weights_precision:
     widget: "select"

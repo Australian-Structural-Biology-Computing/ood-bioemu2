@@ -29,6 +29,10 @@ def arguments(**overrides):
         seeds="1,2,2",
         msa_mode="single_sequence",
         job_name="My run",
+        mode="equilibrium",
+        propagate_from="",
+        propagation_steps=1,
+        lag_ns=1.0,
     )
     values.update(overrides)
     return Namespace(**values)
@@ -173,6 +177,50 @@ class GateConsistencyTests(unittest.TestCase):
             (private / "int8" / "bioemu2.int8.bin.zst").write_bytes(b"x" * 200_000_000)
             self.assertEqual(self.gate(private, "int8")[0], "0")
             self.assertEqual(self.gate(shared, "int8")[0], "1")
+
+
+class PropagationTests(unittest.TestCase):
+    """Trajectory propagation mirrors upstream's contract exactly."""
+
+    def test_no_start_structure_emits_no_flags(self):
+        self.assertEqual(MODULE.propagation_flags(arguments(propagate_from="")), [])
+
+    def test_valid_request_builds_the_three_runner_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cif = Path(tmp) / "start.cif"
+            cif.write_text("data_x\n", encoding="utf-8")
+            args = arguments(propagate_from=str(cif), propagation_steps=5, lag_ns=2.5)
+            self.assertEqual(
+                MODULE.propagation_flags(args),
+                [
+                    f"--bioemu2_propagate_from={cif}",
+                    "--bioemu2_propagation_steps=5",
+                    "--bioemu2_lag_ns=2.5",
+                ],
+            )
+            self.assertEqual(MODULE.effective_mode(args), "equilibrium")
+
+    def test_structure_mode_with_a_start_structure_is_rejected(self):
+        # Upstream rejects BIOEMU2_MODE=structure with BIOEMU2_X0 set; the app
+        # raises the same contract before a GPU allocation is spent.
+        args = arguments(propagate_from="/tmp/whatever.cif", mode="structure")
+        with self.assertRaisesRegex(MODULE.InputError, "equilibrium"):
+            MODULE.effective_mode(args)
+
+    def test_steps_and_lag_bounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cif = Path(tmp) / "start.cif"
+            cif.write_text("data_x\n", encoding="utf-8")
+            for steps in (0, 101, None):
+                with self.assertRaises(MODULE.InputError):
+                    MODULE.propagation_flags(arguments(propagate_from=str(cif), propagation_steps=steps))
+            for lag in (0.0, -1.0, float("nan")):
+                with self.assertRaises(MODULE.InputError):
+                    MODULE.propagation_flags(arguments(propagate_from=str(cif), lag_ns=lag))
+
+    def test_missing_start_structure_fails_before_inference(self):
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            MODULE.propagation_flags(arguments(propagate_from="/nonexistent/x.cif"))
 
 
 class ReportTests(unittest.TestCase):

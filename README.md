@@ -37,15 +37,20 @@ The form accepts:
 - optional DNA and RNA chains;
 - optional ligands by Protein Data Bank Chemical Component Dictionary code or SMILES;
 - structure-prediction or equilibrium-ensemble mode;
+- optional trajectory propagation: a starting mmCIF of the same input (for example a
+  sample from an earlier run) is propagated through time, each sample becoming a
+  trajectory of up to 100 steps one lag time apart; propagation implies equilibrium
+  mode and is rejected against structure mode, mirroring upstream;
 - ColabFold server or single-sequence mode;
 - seeds, recycles, samples per seed, sampler, physicality preset, and stored-weight
   representation.
 
 Identical protein sequences are represented as copies of one entity, matching the notebook.
-All input is parsed into an AlphaFold-3-dialect JSON file before inference. The application
-never executes input text. Molecular input fields are not cached by Open OnDemand. Following
-the established ProteinFold app pattern, one path-selector control accepts either direct
-sequence text or a FASTA path. A selected FASTA file is copied into the run's private work
+A selected starting structure is copied into the run's private work directory and mounted
+into the container, like the FASTA input. All input is parsed into an AlphaFold-3-dialect
+JSON file before inference. The application never executes input text. Molecular input
+fields are not cached by Open OnDemand. Following the established ProteinFold app pattern,
+one path-selector control accepts either direct sequence text or a FASTA path. A selected FASTA file is copied into the run's private work
 directory, which is mounted into the container so the runner can read it.
 
 ## Output layout
