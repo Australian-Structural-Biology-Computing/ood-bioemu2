@@ -342,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if not 1 <= args.num_recycles <= 30:
         raise InputError("recycles must be between 1 and 30")
-    if not 1 <= args.num_diffusion_samples <= 100:
-        raise InputError("samples per seed must be between 1 and 100")
+    if not 1 <= args.num_diffusion_samples <= 1000:
+        raise InputError("samples per seed must be between 1 and 1000")
     if not args.runner.is_file():
         raise RuntimeError(f"pinned ColabFold runner is unavailable: {args.runner}")
 
